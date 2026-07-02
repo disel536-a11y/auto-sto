@@ -42,6 +42,7 @@ KAKAO_REST_API_KEY = _cfg("KAKAO_REST_API_KEY")
 _BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 KAKAO_TOKEN_FILE = os.path.join(_BASE_DIR, "kakao_token.json")       # 본인
 KAKAO_FRIENDS_FILE = os.path.join(_BASE_DIR, "kakao_friends.json")   # 친구들(자동 갱신)
+DATA_FILE = os.path.join(_BASE_DIR, "data.json")                     # 대시보드용 최신 결과
 KAKAO_TOKENS = [
     # "친구_access_token_여기에",  # (레거시) 자동갱신 안 됨. 친구는 kakao_add_friend.py 사용 권장
 ]
@@ -753,6 +754,33 @@ def fmt_theme(groups: list) -> str:
     return "\n".join(lines).strip()
 
 
+# ─── 대시보드 데이터 저장 ─────────────────────────
+
+def save_dashboard_data(upper: list, theme_map: dict, groups: list):
+    """웹 대시보드가 읽을 최신 결과를 data.json 으로 저장."""
+    data = {
+        "updated": datetime.now().strftime("%Y-%m-%d %H:%M"),
+        "upper": [{
+            "name": s["종목명"], "rate": s["등락률"], "market": s["시장"],
+            "theme": (theme_map.get(s["코드"]) or {}).get("theme", ""),
+        } for s in upper],
+        "themes": [{
+            "theme": g["테마"], "summary": g.get("요약", ""),
+            "stocks": [{
+                "name": m["종목명"], "rate": m["등락률"],
+                "sector": m.get("업종", ""), "cap": m.get("시총억", 0),
+                "flags": m.get("특이사항", []),
+            } for m in g["종목"]],
+        } for g in groups],
+    }
+    try:
+        with open(DATA_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        print(f"  [data] 저장: 상한가 {len(data['upper'])}, 테마 {len(data['themes'])}")
+    except Exception as e:
+        print(f"  [data] 저장 오류: {e}")
+
+
 # ─── 장 시간 체크 ─────────────────────────────────
 
 def is_market_open() -> bool:
@@ -791,6 +819,7 @@ def run_once():
     # ① 상한가 알림 (+ 테마/뉴스 요약)
     upper = sorted([s for s in stocks if s["등락률"] >= UPPER_LIMIT_THRESHOLD],
                    key=lambda x: x["등락률"], reverse=True)
+    theme_map = {}
     if upper:
         print(f"② 상한가 {len(upper)}종목 → 뉴스/테마 분석 중...", flush=True)
         theme_map = classify_upper(upper)
@@ -810,6 +839,7 @@ def run_once():
     else:
         print("  테마 조건 충족 종목 없음")
 
+    save_dashboard_data(upper, theme_map, themes or [])
     print("\n단발 실행 완료.")
 
 
@@ -821,6 +851,8 @@ def main():
     print("=" * 50)
 
     alerted = set()
+    upper_theme_map = {}
+    last_themes = []
     last_theme_min = -1
     first_run = True
 
@@ -851,35 +883,39 @@ def main():
 
         stocks = list(market["all"].values())
 
-        # ① 상한가 알림 (+ 테마/뉴스 요약)
-        upper = [s for s in stocks
-                 if s["등락률"] >= UPPER_LIMIT_THRESHOLD and s["코드"] not in alerted]
-        upper = sorted(upper, key=lambda x: x["등락률"], reverse=True)
-        if upper:
-            theme_map = classify_upper(upper)
-            msg = fmt_upper(upper, theme_map)
+        # ① 상한가 — 대시보드용 전체 목록 + 신규만 카톡
+        upper_all = sorted([s for s in stocks if s["등락률"] >= UPPER_LIMIT_THRESHOLD],
+                           key=lambda x: x["등락률"], reverse=True)
+        new_upper = [s for s in upper_all if s["코드"] not in alerted]
+        if new_upper:
+            tm = classify_upper(new_upper)
+            upper_theme_map.update(tm)
+            msg = fmt_upper(new_upper, tm)
             print(msg)
             if send_kakao(msg):
-                for s in upper:
+                for s in new_upper:
                     alerted.add(s["코드"])
         else:
             print("  상한가 신규 없음")
 
-        # ② 티마식 테마 분석 알림
-        # 첫 실행 즉시, 이후 09~10시 10분마다, 그 외 30분마다
+        # ② 테마 분석 — 첫 실행 즉시, 이후 09~10시 10분마다, 그 외 30분마다
         cur_min = now.hour * 60 + now.minute
         interval = 10 if 9 * 60 <= cur_min < 10 * 60 else 30
         do_theme = first_run or (now.minute % interval == 0 and cur_min != last_theme_min)
         if do_theme:
-            themes = analyze_themes(market)
-            if themes:
-                msg = fmt_theme(themes)
+            groups = analyze_themes(market)
+            if groups:
+                last_themes = groups
+                msg = fmt_theme(groups)
                 print(msg)
                 send_kakao(msg)
             else:
                 print("  테마 조건 충족 종목 없음")
             last_theme_min = cur_min
             first_run = False
+
+        # 대시보드 데이터 저장 (매 스캔)
+        save_dashboard_data(upper_all, upper_theme_map, last_themes)
 
         print(f"  → {SCAN_INTERVAL//60}분 후 재스캔")
         time.sleep(SCAN_INTERVAL)

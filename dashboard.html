@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="theme-color" content="#0d0f12" id="metaTheme">
+<title>마켓중심</title>
+<style>
+  :root{
+    --bg:#0d0f12; --scr:#15171c; --s1:#1e2128; --bd:rgba(255,255,255,.09);
+    --tp:#e9eaee; --ts:#a1a4ac; --tm:#6c7079; --up:#ff6b66; --suc:#37c07d; --sucbg:rgba(55,192,125,.16);
+  }
+  [data-theme="light"]{
+    --bg:#efeee8; --scr:#ffffff; --s1:#f4f3ee; --bd:rgba(0,0,0,.10);
+    --tp:#1b1b1a; --ts:#5f5e5a; --tm:#8a8880; --up:#d63a3a; --suc:#0f9e5a; --sucbg:rgba(15,158,90,.12);
+  }
+  *{box-sizing:border-box; -webkit-tap-highlight-color:transparent;}
+  body{margin:0; background:var(--bg); color:var(--tp);
+    font-family:-apple-system,BlinkMacSystemFont,"Malgun Gothic","맑은 고딕",sans-serif;}
+  .wrap{max-width:480px; margin:0 auto; min-height:100vh; background:var(--scr);}
+  .hd{position:sticky; top:0; background:var(--scr); border-bottom:0.5px solid var(--bd);
+    padding:12px 16px 9px; z-index:5;}
+  .hrow{display:flex; align-items:center; justify-content:space-between;}
+  .title{font-size:17px; font-weight:600; display:flex; align-items:center; gap:7px;}
+  .live{font-size:11px; color:var(--suc); background:var(--sucbg); padding:2px 7px; border-radius:20px;
+    display:inline-flex; align-items:center; gap:4px;}
+  .dot{width:6px; height:6px; border-radius:50%; background:var(--suc); display:inline-block;}
+  .seg{border:0.5px solid var(--bd); border-radius:8px; display:inline-flex; overflow:hidden;}
+  .seg button{font-size:12px; padding:4px 11px; border:0; background:transparent; color:var(--tm);
+    cursor:pointer; font-family:inherit;}
+  .seg button.on{background:var(--s1); color:var(--tp);}
+  .sub{font-size:12px; color:var(--tm); margin-top:5px;}
+  .sec{padding:10px 16px 2px; font-size:12px; font-weight:600; color:var(--ts);}
+  .list{padding:0 16px;}
+  .r{display:flex; align-items:center; justify-content:space-between; padding:5px 0;
+    border-bottom:0.5px solid var(--bd); font-size:13.5px;}
+  .r:last-child{border-bottom:0;}
+  .tag{color:var(--tm); font-size:11px; margin-left:4px;}
+  .up{color:var(--up); font-weight:600;}
+  .card{margin:0 16px 8px; border:0.5px solid var(--bd); border-radius:12px; padding:9px 11px;}
+  .ct{display:flex; align-items:baseline; justify-content:space-between; margin-bottom:3px;}
+  .cname{font-size:14px; font-weight:600;}
+  .cnt{font-size:11px; color:var(--tm);}
+  .csum{font-size:11.5px; color:var(--ts); line-height:1.45; margin-bottom:7px;}
+  .cs{display:flex; justify-content:space-between; padding:2.5px 0; font-size:12.5px;}
+  .meta{color:var(--tm); font-size:11px;}
+  .ft{text-align:center; color:var(--tm); font-size:11px; padding:14px 0 22px;}
+  .empty{color:var(--tm); font-size:13px; padding:14px 16px;}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="hd">
+    <div class="hrow">
+      <div class="title">마켓중심 <span class="live"><span class="dot"></span>실시간</span></div>
+      <div class="seg">
+        <button data-t="light">라이트</button>
+        <button data-t="dark" class="on">다크</button>
+      </div>
+    </div>
+    <div class="sub" id="sub">불러오는 중…</div>
+  </div>
+
+  <div class="sec">상한가</div>
+  <div class="list" id="upper"></div>
+
+  <div class="sec">테마</div>
+  <div id="themes"></div>
+
+  <div class="ft" id="foot"></div>
+</div>
+
+<script>
+  var root=document.documentElement, meta=document.getElementById('metaTheme');
+  function setTheme(t){
+    root.setAttribute('data-theme', t);
+    meta.setAttribute('content', t==='light' ? '#efeee8' : '#0d0f12');
+    document.querySelectorAll('.seg button').forEach(function(b){b.classList.toggle('on', b.dataset.t===t);});
+    try{ localStorage.setItem('theme', t); }catch(e){}
+  }
+  document.querySelectorAll('.seg button').forEach(function(b){
+    b.addEventListener('click', function(){ setTheme(b.dataset.t); });
+  });
+  var saved='dark';
+  try{ saved=localStorage.getItem('theme')||'dark'; }catch(e){}
+  setTheme(saved);
+
+  function esc(s){var d=document.createElement('div'); d.textContent=s==null?'':String(s); return d.innerHTML;}
+  function pct(r){ return '+'+Number(r).toFixed(2)+'%'; }
+  function sizeText(cap){
+    cap=Number(cap)||0;
+    if(cap<=0) return '';
+    if(cap>=10000) return '시총'+(cap/10000).toFixed(1)+'조';
+    var h=Math.floor(cap/100)*100;
+    return h>=100 ? '시총'+h+'억대' : '시총'+cap+'억';
+  }
+
+  function render(d){
+    document.getElementById('sub').innerHTML =
+      '상한가 <b style="color:var(--up)">'+d.upper.length+'</b> · 테마 <b>'+d.themes.length+'</b> · '+esc(d.updated||'-');
+
+    var u=document.getElementById('upper');
+    if(!d.upper.length){ u.innerHTML='<div class="empty">현재 상한가 종목이 없습니다.</div>'; }
+    else{
+      u.innerHTML = d.upper.map(function(s){
+        var tag = s.theme ? '<span class="tag">'+esc(s.theme)+'</span>' : '';
+        return '<div class="r"><span>'+esc(s.name)+tag+'</span><span class="up">'+pct(s.rate)+'</span></div>';
+      }).join('');
+    }
+
+    var th=document.getElementById('themes');
+    if(!d.themes.length){ th.innerHTML='<div class="empty">분석된 테마가 없습니다.</div>'; }
+    else{
+      th.innerHTML = d.themes.map(function(g){
+        var rows = g.stocks.map(function(m){
+          var parts=[]; if(m.sector) parts.push(esc(m.sector));
+          var sz=sizeText(m.cap); if(sz) parts.push(sz);
+          if(m.flags&&m.flags.length) parts=parts.concat(m.flags.map(esc));
+          var meta = parts.length ? ' <span class="meta">'+parts.join('·')+'</span>' : '';
+          return '<div class="cs"><span>'+esc(m.name)+meta+'</span><span class="up">'+pct(m.rate)+'</span></div>';
+        }).join('');
+        var sum = g.summary ? '<div class="csum">'+esc(g.summary).replace(/\n/g,' ')+'</div>' : '';
+        return '<div class="card"><div class="ct"><span class="cname">'+esc(g.theme)+
+          '</span><span class="cnt">'+g.stocks.length+'종목</span></div>'+sum+rows+'</div>';
+      }).join('');
+    }
+
+    document.getElementById('foot').textContent = '마지막 업데이트 '+(d.updated||'-')+' · 1분마다 자동 새로고침';
+  }
+
+  function load(){
+    fetch('/api/data',{cache:'no-store'})
+      .then(function(r){return r.json();})
+      .then(render)
+      .catch(function(){ document.getElementById('sub').textContent='데이터를 불러오지 못했습니다.'; });
+  }
+  load();
+  setInterval(load, 60000);
+</script>
+</body>
+</html>
