@@ -47,6 +47,9 @@ KAKAO_TOKENS = [
     # "친구_access_token_여기에",  # (레거시) 자동갱신 안 됨. 친구는 kakao_add_friend.py 사용 권장
 ]
 
+# 카카오 알림 사용 여부 — False 면 카톡 전송 안 함(대시보드만 사용). 다시 켜려면 True.
+KAKAO_ENABLED = False
+
 # ── Gemini (Google AI Studio) API 키 ────────────────
 GEMINI_API_KEY = _cfg("GEMINI_API_KEY")
 GEMINI_MODEL = "gemini-2.5-flash"   # 무료 티어 확인됨 ✓ (대안: "gemini-2.5-flash-lite")
@@ -664,6 +667,8 @@ def _split_message(message: str, limit: int = 900) -> list:
 
 
 def send_kakao(message: str) -> bool:
+    if not KAKAO_ENABLED:
+        return False
     success = False
     chunks = _split_message(message)
 
@@ -890,11 +895,11 @@ def main():
         if new_upper:
             tm = classify_upper(new_upper)
             upper_theme_map.update(tm)
+            for s in new_upper:
+                alerted.add(s["코드"])          # 분석 완료 표시(중복 분석 방지)
             msg = fmt_upper(new_upper, tm)
             print(msg)
-            if send_kakao(msg):
-                for s in new_upper:
-                    alerted.add(s["코드"])
+            send_kakao(msg)                      # KAKAO_ENABLED=False 면 내부에서 전송 skip
         else:
             print("  상한가 신규 없음")
 
