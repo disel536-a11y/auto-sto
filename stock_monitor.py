@@ -768,13 +768,16 @@ def save_dashboard_data(upper: list, theme_map: dict, groups: list):
         "upper": [{
             "name": s["종목명"], "rate": s["등락률"], "market": s["시장"],
             "theme": (theme_map.get(s["코드"]) or {}).get("theme", ""),
+            "amount": round(s.get("거래대금", 0) / 1e8),      # 거래대금(억원)
         } for s in upper],
         "themes": [{
             "theme": g["테마"], "summary": g.get("요약", ""),
+            "amount": round(sum(m.get("거래대금", 0) for m in g["종목"]) / 1e8),  # 테마 총 거래대금(억원)
             "stocks": [{
                 "name": m["종목명"], "rate": m["등락률"],
                 "sector": m.get("업종", ""), "cap": m.get("시총억", 0),
                 "flags": m.get("특이사항", []),
+                "amount": round(m.get("거래대금", 0) / 1e8),   # 거래대금(억원)
             } for m in g["종목"]],
         } for g in groups],
     }

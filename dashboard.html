@@ -39,6 +39,7 @@
   .r:last-child{border-bottom:0;}
   .tag{color:var(--tm); font-size:11px; margin-left:4px;}
   .up{color:var(--up); font-weight:600;}
+  .amt{color:var(--tm); font-size:11px; margin-right:6px;}
   .card{margin:0 16px 8px; border:0.5px solid var(--bd); border-radius:12px; padding:9px 11px;}
   .ct{display:flex; align-items:baseline; justify-content:space-between; margin-bottom:3px;}
   .cname{font-size:14px; font-weight:600;}
@@ -89,6 +90,7 @@
 
   function esc(s){var d=document.createElement('div'); d.textContent=s==null?'':String(s); return d.innerHTML;}
   function pct(r){ return '+'+Number(r).toFixed(2)+'%'; }
+  function amt(v){ v=Number(v)||0; return v>0 ? '<span class="amt">'+v.toLocaleString()+'억</span>' : ''; }
   function sizeText(cap){
     cap=Number(cap)||0;
     if(cap<=0) return '';
@@ -106,7 +108,7 @@
     else{
       u.innerHTML = d.upper.map(function(s){
         var tag = s.theme ? '<span class="tag">'+esc(s.theme)+'</span>' : '';
-        return '<div class="r"><span>'+esc(s.name)+tag+'</span><span class="up">'+pct(s.rate)+'</span></div>';
+        return '<div class="r"><span>'+esc(s.name)+tag+'</span><span>'+amt(s.amount)+'<span class="up">'+pct(s.rate)+'</span></span></div>';
       }).join('');
     }
 
@@ -119,11 +121,12 @@
           var sz=sizeText(m.cap); if(sz) parts.push(sz);
           if(m.flags&&m.flags.length) parts=parts.concat(m.flags.map(esc));
           var meta = parts.length ? ' <span class="meta">'+parts.join('·')+'</span>' : '';
-          return '<div class="cs"><span>'+esc(m.name)+meta+'</span><span class="up">'+pct(m.rate)+'</span></div>';
+          return '<div class="cs"><span>'+esc(m.name)+meta+'</span><span>'+amt(m.amount)+'<span class="up">'+pct(m.rate)+'</span></span></div>';
         }).join('');
         var sum = g.summary ? '<div class="csum">'+esc(g.summary).replace(/\n/g,' ')+'</div>' : '';
+        var total = Number(g.amount)>0 ? '<span class="amt">'+Number(g.amount).toLocaleString()+'억</span> · ' : '';
         return '<div class="card"><div class="ct"><span class="cname">'+esc(g.theme)+
-          '</span><span class="cnt">'+g.stocks.length+'종목</span></div>'+sum+rows+'</div>';
+          '</span><span class="cnt">'+total+g.stocks.length+'종목</span></div>'+sum+rows+'</div>';
       }).join('');
     }
 
