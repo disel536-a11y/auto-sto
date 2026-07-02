@@ -193,12 +193,11 @@ def fetch_market_data() -> dict:
         if s["코드"] not in qmap or s["거래대금"] > qmap[s["코드"]]["거래대금"]:
             qmap[s["코드"]] = s
 
-    # 상승률 종목에 거래대금/시총 보강(quant 에 있으면)
+    # 상승률 종목의 거래대금/시총을 quant(거래대금 페이지) 값으로 통일 → 상한가 목록과 일치
     for s in rise:
         q = qmap.get(s["코드"])
         if q:
-            if not s.get("거래대금"):
-                s["거래대금"] = q["거래대금"]
+            s["거래대금"] = q["거래대금"]   # 항상 quant 값으로 덮어씀(신뢰 소스)
             if not s.get("시총억"):
                 s["시총억"] = q["시총억"]
 
@@ -524,8 +523,7 @@ def analyze_themes(market: dict) -> list:
             "테마": (t.get("테마") or "기타").strip(),
             "요약": (t.get("요약") or "").strip(),
             "종목": members,
-            "_시드": any(m["코드"] in seed_codes for m in members),
-            "_top": members[0]["등락률"],
+            "_amount": sum(m.get("거래대금", 0) for m in members),   # 테마 총 거래대금
         })
 
     # 미분류 종목 → 기타 급등
@@ -533,10 +531,10 @@ def analyze_themes(market: dict) -> list:
     if leftover:
         leftover.sort(key=lambda x: x["등락률"], reverse=True)
         groups.append({"테마": "기타 급등주", "요약": "", "종목": leftover,
-                       "_시드": False, "_top": leftover[0]["등락률"]})
+                       "_amount": sum(m.get("거래대금", 0) for m in leftover)})
 
-    # 테마 정렬: 시드 포함 우선 → 최고 상승률
-    groups.sort(key=lambda g: (g["_시드"], g["_top"]), reverse=True)
+    # 테마 정렬: 총 거래대금 높은 순
+    groups.sort(key=lambda g: g["_amount"], reverse=True)
     return groups
 
 
