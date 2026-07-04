@@ -31,6 +31,13 @@
   .seg button{font-size:12px; padding:4px 11px; border:0; background:transparent; color:var(--tm);
     cursor:pointer; font-family:inherit;}
   .seg button.on{background:var(--s1); color:var(--tp);}
+  .hd-right{display:flex; align-items:center; gap:8px;}
+  .rfs{width:30px; height:26px; border:0.5px solid var(--bd); border-radius:8px; background:transparent;
+    color:var(--ts); font-size:15px; cursor:pointer; font-family:inherit; line-height:1; padding:0;
+    display:inline-flex; align-items:center; justify-content:center;}
+  .rfs:active{background:var(--s1);}
+  .rfs.spin{color:var(--suc); animation:rfspin .8s linear infinite;}
+  @keyframes rfspin{to{transform:rotate(360deg);}}
   .sub{font-size:12px; color:var(--tm); margin-top:5px;}
   .sec{padding:10px 16px 2px; font-size:12px; font-weight:600; color:var(--ts);}
   .list{padding:0 16px;}
@@ -56,9 +63,12 @@
   <div class="hd">
     <div class="hrow">
       <div class="title">마켓중심 <span class="live"><span class="dot"></span>실시간</span></div>
-      <div class="seg">
-        <button data-t="light">라이트</button>
-        <button data-t="dark" class="on">다크</button>
+      <div class="hd-right">
+        <button id="refreshBtn" class="rfs" title="전체 새로고침" aria-label="새로고침">↻</button>
+        <div class="seg">
+          <button data-t="light">라이트</button>
+          <button data-t="dark" class="on">다크</button>
+        </div>
       </div>
     </div>
     <div class="sub" id="sub">불러오는 중…</div>
@@ -99,7 +109,9 @@
     return h>=100 ? '시총'+h+'억대' : '시총'+cap+'억';
   }
 
+  var lastUpdated='';
   function render(d){
+    lastUpdated = d.updated||'';
     document.getElementById('sub').innerHTML =
       '상한가 <b style="color:var(--up)">'+d.upper.length+'</b> · 테마 <b>'+d.themes.length+'</b> · '+esc(d.updated||'-');
 
@@ -130,7 +142,7 @@
       }).join('');
     }
 
-    document.getElementById('foot').textContent = '마지막 업데이트 '+(d.updated||'-')+' · 1분마다 자동 새로고침';
+    document.getElementById('foot').textContent = '마지막 업데이트 '+(d.updated||'-')+' · 1분마다 시세 갱신 · 3분마다 테마 재분석';
   }
 
   function load(){
@@ -141,6 +153,32 @@
   }
   load();
   setInterval(load, 60000);
+
+  // ── 수동 새로고침 버튼 (상한가+테마 전체 재분석) ──
+  var rbtn=document.getElementById('refreshBtn'), refreshing=false;
+  function endRefresh(){ refreshing=false; rbtn.classList.remove('spin'); }
+  function pollRefresh(before, n){
+    if(n>24){ endRefresh(); return; }              // ~72초 타임아웃
+    fetch('/api/data',{cache:'no-store'})
+      .then(function(r){return r.json();})
+      .then(function(d){
+        if(d.updated && d.updated!==before){ render(d); endRefresh(); }
+        else setTimeout(function(){ pollRefresh(before, n+1); }, 3000);
+      })
+      .catch(function(){ setTimeout(function(){ pollRefresh(before, n+1); }, 3000); });
+  }
+  rbtn.addEventListener('click', function(){
+    if(refreshing) return;
+    refreshing=true; rbtn.classList.add('spin');
+    var before=lastUpdated;
+    fetch('/api/refresh',{method:'POST'})
+      .then(function(r){return r.json();})
+      .then(function(res){
+        if(res && res.status==='busy'){ endRefresh(); return; }
+        pollRefresh(before, 0);
+      })
+      .catch(function(){ endRefresh(); });
+  });
 </script>
 </body>
 </html>

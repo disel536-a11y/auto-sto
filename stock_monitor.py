@@ -43,6 +43,9 @@ _BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 KAKAO_TOKEN_FILE = os.path.join(_BASE_DIR, "kakao_token.json")       # 본인
 KAKAO_FRIENDS_FILE = os.path.join(_BASE_DIR, "kakao_friends.json")   # 친구들(자동 갱신)
 DATA_FILE = os.path.join(_BASE_DIR, "data.json")                     # 대시보드용 최신 결과
+REFRESH_FLAG = os.path.join(_BASE_DIR, "refresh.flag")               # 웹 새로고침 버튼 신호(봇 루프가 감지)
+HEARTBEAT_FILE = os.path.join(_BASE_DIR, "bot.heartbeat")            # 봇 루프 생존 신호(웹서버가 확인)
+REFRESH_LOCK = os.path.join(_BASE_DIR, "refresh.lock")              # 장외 --once 중복 실행 방지 락
 KAKAO_TOKENS = [
     # "친구_access_token_여기에",  # (레거시) 자동갱신 안 됨. 친구는 kakao_add_friend.py 사용 권장
 ]
@@ -62,8 +65,13 @@ TRANS_TOP_N   = 15    # 거래대금 상위 N개(대장주 후보) — 삼성전
 SEED_MIN_RATE = 10.0  # 시드 종목 최소 상승률 (%)
 RISE_TOP_N    = 20    # 상승률 상위 N개 (동일 테마 편입 대상)
 
-# 스캔 주기 (초)  →  300 = 5분
-SCAN_INTERVAL = 300
+# 시세 스캔 주기 (초)  →  60 = 1분 (상한가 목록 + 테마 종목 시세를 매분 갱신)
+SCAN_INTERVAL = 60
+
+# 테마 LLM 재분류 주기 (초) → 180 = 3분
+#   그 사이 스캔에서는 Gemini 호출 없이 기존 테마 종목의 시세만 갱신 → 무료 할당량 보호.
+#   장중 6.5시간 기준 하루 약 130회 LLM 호출(무료 한도 ~250/일 이내).
+THEME_LLM_INTERVAL = 180
 
 # ══════════════════════════════════════════════════
 
@@ -780,11 +788,43 @@ def save_dashboard_data(upper: list, theme_map: dict, groups: list):
         } for g in groups],
     }
     try:
-        with open(DATA_FILE, "w", encoding="utf-8") as f:
+        # 원자적 저장(tmp→replace): 봇 루프와 --once 서브프로세스가 동시에 써도 부분읽기 방지
+        tmp = DATA_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, DATA_FILE)
         print(f"  [data] 저장: 상한가 {len(data['upper'])}, 테마 {len(data['themes'])}")
     except Exception as e:
         print(f"  [data] 저장 오류: {e}")
+
+
+def refresh_group_prices(groups: list, market: dict) -> list:
+    """LLM 호출 없이 기존 테마 그룹 종목의 시세(등락률/종가/거래대금/시총)만 최신값으로 갱신.
+    상위 목록에서 빠진 종목은 직전 값 유지(다음 LLM 재분류 때 정리됨)."""
+    allmap = market.get("all", {})
+    for g in groups:
+        for m in g.get("종목", []):
+            fresh = allmap.get(m.get("코드"))
+            if not fresh:
+                continue
+            m["등락률"] = fresh.get("등락률", m.get("등락률", 0))
+            if fresh.get("종가"):
+                m["종가"] = fresh["종가"]
+            if fresh.get("거래대금"):
+                m["거래대금"] = fresh["거래대금"]
+            if fresh.get("시총억"):
+                m["시총억"] = fresh["시총억"]
+        g.get("종목", []).sort(key=lambda x: x.get("등락률", 0), reverse=True)
+    return groups
+
+
+def _touch(path: str):
+    """생존/신호용 파일 타임스탬프 기록."""
+    try:
+        with open(path, "w") as f:
+            f.write(str(time.time()))
+    except Exception:
+        pass
 
 
 # ─── 장 시간 체크 ─────────────────────────────────
@@ -846,20 +886,25 @@ def run_once():
         print("  테마 조건 충족 종목 없음")
 
     save_dashboard_data(upper, theme_map, themes or [])
+    try:
+        if os.path.exists(REFRESH_LOCK):
+            os.remove(REFRESH_LOCK)   # 웹 새로고침(장외) 락 해제 → 다음 새로고침 즉시 가능
+    except OSError:
+        pass
     print("\n단발 실행 완료.")
 
 
 def main():
     print("=" * 50)
     print("  주식 모니터링 봇 시작 (티마식 테마 분석)")
-    print(f"  상한가 기준: {UPPER_LIMIT_THRESHOLD}%  |  주기: {SCAN_INTERVAL//60}분")
+    print(f"  상한가 기준: {UPPER_LIMIT_THRESHOLD}%  |  시세주기: {SCAN_INTERVAL}s  |  테마LLM주기: {THEME_LLM_INTERVAL//60}분")
     print(f"  Gemini LLM: {'연동됨 ✓' if _gemini_ready() else '미설정 (키 입력 필요) ✗'}")
     print("=" * 50)
 
     alerted = set()
     upper_theme_map = {}
     last_themes = []
-    last_theme_min = -1
+    last_theme_ts = 0.0
     first_run = True
 
     while True:
@@ -880,50 +925,67 @@ def main():
             print(f"[{now.strftime('%H:%M')}] 장 마감(15:30) — 오늘 세션 종료")
             break
 
+        _touch(HEARTBEAT_FILE)   # 웹서버가 '봇 가동 중' 확인용(수동 새로고침 라우팅에 사용)
+
+        # 웹 새로고침 버튼 신호 — 있으면 상한가+테마를 raw 부터 강제 전체 재분석
+        force_refresh = os.path.exists(REFRESH_FLAG)
+        if force_refresh:
+            print(f"[{now.strftime('%H:%M')}] 🔄 수동 새로고침 요청 — 상한가+테마 전체 재분석")
+            try:
+                os.remove(REFRESH_FLAG)
+            except OSError:
+                pass
+
         print(f"\n[{now.strftime('%H:%M')}] 스캔 중...")
         market = fetch_market_data()
         if not market["all"]:
             print("  데이터 없음 — 재시도")
-            time.sleep(60)
+            time.sleep(15)
             continue
 
         stocks = list(market["all"].values())
 
-        # ① 상한가 — 대시보드용 전체 목록 + 신규만 카톡
+        # ① 상한가 — 매 스캔 최신 목록(등락률 즉시 반영). 신규는 카톡, 수동새로고침 시 전체 재분류
         upper_all = sorted([s for s in stocks if s["등락률"] >= UPPER_LIMIT_THRESHOLD],
                            key=lambda x: x["등락률"], reverse=True)
         new_upper = [s for s in upper_all if s["코드"] not in alerted]
-        if new_upper:
-            tm = classify_upper(new_upper)
+        classify_targets = upper_all if force_refresh else new_upper
+        if classify_targets:
+            tm = classify_upper(classify_targets)
             upper_theme_map.update(tm)
+        if new_upper:
             for s in new_upper:
-                alerted.add(s["코드"])          # 분석 완료 표시(중복 분석 방지)
-            msg = fmt_upper(new_upper, tm)
+                alerted.add(s["코드"])          # 분석 완료 표시(중복 카톡 방지)
+            msg = fmt_upper(new_upper, upper_theme_map)
             print(msg)
             send_kakao(msg)                      # KAKAO_ENABLED=False 면 내부에서 전송 skip
         else:
             print("  상한가 신규 없음")
 
-        # ② 테마 분석 — 첫 실행 즉시, 이후 09~10시 10분마다, 그 외 30분마다
-        cur_min = now.hour * 60 + now.minute
-        interval = 10 if 9 * 60 <= cur_min < 10 * 60 else 30
-        do_theme = first_run or (now.minute % interval == 0 and cur_min != last_theme_min)
-        if do_theme:
+        # ② 테마 — 3분마다(또는 첫실행/수동새로고침) LLM 재분류, 그 사이엔 시세만 갱신
+        now_ts = time.time()
+        do_theme_llm = first_run or force_refresh or (now_ts - last_theme_ts >= THEME_LLM_INTERVAL)
+        if do_theme_llm:
             groups = analyze_themes(market)
             if groups:
                 last_themes = groups
                 msg = fmt_theme(groups)
                 print(msg)
-                send_kakao(msg)
+                if first_run or force_refresh:
+                    send_kakao(msg)              # 카톡 테마 알림은 첫실행/수동새로고침 때만(도배 방지)
             else:
                 print("  테마 조건 충족 종목 없음")
-            last_theme_min = cur_min
+            last_theme_ts = now_ts
             first_run = False
+        else:
+            refresh_group_prices(last_themes, market)   # LLM 없이 시세만 최신화
+            remain = int(THEME_LLM_INTERVAL - (now_ts - last_theme_ts))
+            print(f"  테마 시세만 갱신 (다음 LLM 재분류까지 {max(0, remain)}s)")
 
         # 대시보드 데이터 저장 (매 스캔)
         save_dashboard_data(upper_all, upper_theme_map, last_themes)
 
-        print(f"  → {SCAN_INTERVAL//60}분 후 재스캔")
+        print(f"  → {SCAN_INTERVAL}s 후 재스캔")
         time.sleep(SCAN_INTERVAL)
 
 
