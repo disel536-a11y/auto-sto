@@ -73,6 +73,13 @@ SCAN_INTERVAL = 60
 #   장중 6.5시간 기준 하루 약 130회 LLM 호출(무료 한도 ~250/일 이내).
 THEME_LLM_INTERVAL = 180
 
+# ── 조건부합(대시보드 테마탭 최상단) 파라미터 ──────────
+#   각 테마의 상승률 1위(=대장)가 대금 하한을 넘고, 같은 테마에 동조 상승 종목(2등주)이
+#   있으면 후보. 상승률순 상위 MATCH_MAX개만 표시. 대금이 HL 이상이면 빨간 테두리 강조.
+MATCH_AMOUNT_MIN_EOK = 1000   # 대장 최소 거래대금(억) — 장 상황 따라 조절
+MATCH_AMOUNT_HL_EOK  = 3000   # 이 값 이상이면 빨간 테두리 강조(억)
+MATCH_MAX            = 3      # 최대 표시 종목 수
+
 # ══════════════════════════════════════════════════
 
 NAVER_HEADERS = {
@@ -767,10 +774,59 @@ def fmt_theme(groups: list) -> str:
 
 # ─── 대시보드 데이터 저장 ─────────────────────────
 
+_news_cache = {}   # 코드 → (조회시각, 헤드라인 리스트) : 후보 뉴스 반복조회 방지
+
+
+def _news_cached(code: str, ttl: int = 300) -> list:
+    """조건부합 후보 뉴스는 5분 캐시(매 스캔 네이버 반복호출 방지)."""
+    now = time.time()
+    hit = _news_cache.get(code)
+    if hit and now - hit[0] < ttl:
+        return hit[1]
+    heads = get_news_headlines(code, n=3)
+    _news_cache[code] = (now, heads)
+    return heads
+
+
+def compute_match(groups: list) -> list:
+    """조건부합: 각 테마의 상승률 1위(대장)가 대금 하한↑ + 동조 2등주 존재 시 후보.
+    상승률순 상위 MATCH_MAX개. 뉴스는 소프트(가점 아님, 링크만) — 없어도 제외 안 함."""
+    min_won = MATCH_AMOUNT_MIN_EOK * 1e8
+    hl_won = MATCH_AMOUNT_HL_EOK * 1e8
+    cands = []
+    for g in groups:
+        stocks = g.get("종목", [])
+        if len(stocks) < 2:                       # 2·3등주 없는 개별주 제외
+            continue
+        leader = max(stocks, key=lambda m: m.get("등락률", 0))
+        amt = leader.get("거래대금", 0) or 0
+        if amt < min_won:                         # 대장 대금 하한
+            continue
+        co = [m for m in stocks if m is not leader and m.get("등락률", 0) > 0]
+        if not co:                                # 동조(같이 오르는 종목) 없으면 제외
+            continue
+        cands.append({
+            "name": leader["종목명"], "code": leader.get("코드", ""),
+            "rate": leader.get("등락률", 0), "amount": round(amt / 1e8),
+            "theme": g.get("테마", ""), "sector": leader.get("업종", ""),
+            "cap": leader.get("시총억", 0),
+            "highlight": amt >= hl_won,            # 대금 3천억↑ → 빨간 테두리
+            "peers": len(co), "peer_top": co[0].get("종목명", ""),
+        })
+    cands.sort(key=lambda c: c["rate"], reverse=True)
+    cands = cands[:MATCH_MAX]
+    for c in cands:                               # 후보에만 뉴스 부착(≤3종목)
+        heads = _news_cached(c["code"])
+        c["news"] = bool(heads)
+        c["news_url"] = f"https://finance.naver.com/item/news_news.naver?code={c['code']}"
+    return cands
+
+
 def save_dashboard_data(upper: list, theme_map: dict, groups: list):
     """웹 대시보드가 읽을 최신 결과를 data.json 으로 저장."""
     data = {
         "updated": datetime.now().strftime("%Y-%m-%d %H:%M"),
+        "match": compute_match(groups),
         "upper": [{
             "name": s["종목명"], "rate": s["등락률"], "market": s["시장"],
             "theme": (theme_map.get(s["코드"]) or {}).get("theme", ""),

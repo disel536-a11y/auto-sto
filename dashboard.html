@@ -68,6 +68,14 @@
   .wr .rt{display:flex; align-items:center; gap:4px;}
   .ft{text-align:center; color:var(--tm); font-size:11px; padding:14px 0 22px;}
   .empty{color:var(--tm); font-size:13px; padding:14px 16px;}
+  .sec.m{color:var(--up);}
+  .mcard{margin:0 16px 8px; border:0.5px solid var(--bd); border-radius:12px; padding:9px 11px;}
+  .mcard.hl{border:2px solid var(--up);}
+  .mtop{display:flex; align-items:baseline; justify-content:space-between; margin-bottom:2px;}
+  .mname{font-size:14px; font-weight:600;}
+  .mmeta{font-size:11px; color:var(--tm); line-height:1.5;}
+  .mnews{color:var(--suc); font-size:11px; text-decoration:none;}
+  .mnews.no{color:var(--tm);}
   .tabbar{position:fixed; left:50%; transform:translateX(-50%); bottom:0; width:100%; max-width:480px;
     display:flex; background:var(--scr); border-top:0.5px solid var(--bd); z-index:10;}
   .tabbar button{flex:1; border:0; background:transparent; color:var(--tm); cursor:pointer;
@@ -96,6 +104,8 @@
 
   <!-- ── 테마 탭: 상한가 + 테마 ── -->
   <div id="viewTheme">
+    <div class="sec m" id="matchSec" style="display:none">조건부합</div>
+    <div id="match"></div>
     <div class="sec">상한가</div>
     <div class="list" id="upper"></div>
     <div class="sec">테마</div>
@@ -115,8 +125,8 @@
   </div>
 
   <div class="tabbar">
-    <button id="tabTheme" class="on"><span class="ico">📊</span><span>테마</span></button>
-    <button id="tabWarn"><span class="ico">⚠️</span><span>투경</span></button>
+    <button id="tabTheme" class="on"><svg class="ico" viewBox="0 0 24 24" width="21" height="21" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 17l5-5 4 4 9-9"/><path d="M17 7h4v4"/></svg><span>테마</span></button>
+    <button id="tabWarn"><svg class="ico" viewBox="0 0 24 24" width="21" height="21" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="10.5" cy="10.5" r="6.5"/><path d="M20 20l-4.2-4.2"/></svg><span>투경</span></button>
   </div>
 </div>
 
@@ -148,9 +158,27 @@
 
   // ── 테마 탭 렌더 ──
   var lastUpdated='';
+  function renderMatch(arr){
+    var sec=document.getElementById('matchSec'), box=document.getElementById('match');
+    if(!arr || !arr.length){ sec.style.display='none'; box.innerHTML=''; return; }
+    sec.style.display='';
+    box.innerHTML = arr.map(function(m){
+      var tag = m.theme ? '<span class="tag">'+esc(m.theme)+'</span>' : '';
+      var meta=[]; if(m.sector) meta.push(esc(m.sector));
+      var sz=sizeText(m.cap); if(sz) meta.push(sz);
+      meta.push('동조 '+(m.peers||0)+'종목'+(m.peer_top?' ('+esc(m.peer_top)+' 외)':''));
+      var news = m.news
+        ? '<a class="mnews" href="'+esc(m.news_url)+'" target="_blank" rel="noopener">뉴스 있음 ↗</a>'
+        : '<a class="mnews no" href="'+esc(m.news_url)+'" target="_blank" rel="noopener">뉴스 확인 ↗</a>';
+      return '<div class="mcard'+(m.highlight?' hl':'')+'"><div class="mtop"><span class="mname">'+
+        esc(m.name)+' '+tag+'</span><span>'+amt(m.amount)+'<span class="up">'+pct(m.rate)+'</span></span></div>'+
+        '<div class="mmeta">'+meta.join(' · ')+' · '+news+'</div></div>';
+    }).join('');
+  }
   function renderTheme(d){
     lastUpdated = d.updated||'';
     if(tab==='theme') setThemeSub(d);
+    renderMatch(d.match||[]);
     var u=document.getElementById('upper');
     if(!d.upper.length){ u.innerHTML='<div class="empty">현재 상한가 종목이 없습니다.</div>'; }
     else{

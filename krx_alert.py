@@ -179,6 +179,9 @@ def build(warn_raw, danger_raw, over_raw, ref_day: dt.date):
 
     over_out = []
     for r in over_raw:
+        el = elapsed(r.get("design_dd", "-"))
+        if el > 10:                    # 10거래일 초과 단기과열은 표시 제외(사용자 요청)
+            continue
         tp = r.get("fluc_tp_cd", "0")
         chg = str(r.get("cmpprevdd_prc", "0"))
         over_out.append({
@@ -186,7 +189,7 @@ def build(warn_raw, danger_raw, over_raw, ref_day: dt.date):
             "price": r.get("tdd_clsprc", "-"),
             "chg": chg, "up": tp == "2", "down": tp == "1",
             "des": fmt(r.get("design_dd", "-")), "free": fmt(r.get("releas_dd", "-")),
-            "elapsed": elapsed(r.get("design_dd", "-")),
+            "elapsed": el,
         })
 
     return {
