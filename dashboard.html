@@ -10,22 +10,25 @@
 <style>
   :root{
     --bg:#0d0f12; --scr:#15171c; --s1:#1e2128; --bd:rgba(255,255,255,.09);
-    --tp:#e9eaee; --ts:#a1a4ac; --tm:#6c7079; --up:#ff6b66; --suc:#37c07d; --sucbg:rgba(55,192,125,.16);
+    --tp:#e9eaee; --ts:#a1a4ac; --tm:#6c7079; --up:#ff6b66; --dn:#4c8dff;
+    --suc:#37c07d; --sucbg:rgba(55,192,125,.16); --warn:#e3b341;
   }
   [data-theme="light"]{
     --bg:#efeee8; --scr:#ffffff; --s1:#f4f3ee; --bd:rgba(0,0,0,.10);
-    --tp:#1b1b1a; --ts:#5f5e5a; --tm:#8a8880; --up:#d63a3a; --suc:#0f9e5a; --sucbg:rgba(15,158,90,.12);
+    --tp:#1b1b1a; --ts:#5f5e5a; --tm:#8a8880; --up:#d63a3a; --dn:#2f6fe0;
+    --suc:#0f9e5a; --sucbg:rgba(15,158,90,.12); --warn:#b8860b;
   }
   *{box-sizing:border-box; -webkit-tap-highlight-color:transparent;}
   body{margin:0; background:var(--bg); color:var(--tp);
     font-family:-apple-system,BlinkMacSystemFont,"Malgun Gothic","맑은 고딕",sans-serif;}
-  .wrap{max-width:480px; margin:0 auto; min-height:100vh; background:var(--scr);}
+  .wrap{max-width:480px; margin:0 auto; min-height:100vh; background:var(--scr); padding-bottom:64px;}
   .hd{position:sticky; top:0; background:var(--scr); border-bottom:0.5px solid var(--bd);
     padding:12px 16px 9px; z-index:5;}
   .hrow{display:flex; align-items:center; justify-content:space-between;}
   .title{font-size:17px; font-weight:600; display:flex; align-items:center; gap:7px;}
   .live{font-size:11px; color:var(--suc); background:var(--sucbg); padding:2px 7px; border-radius:20px;
     display:inline-flex; align-items:center; gap:4px;}
+  .live.mkt{color:var(--tm); background:transparent; border:0.5px solid var(--bd);}
   .dot{width:6px; height:6px; border-radius:50%; background:var(--suc); display:inline-block;}
   .seg{border:0.5px solid var(--bd); border-radius:8px; display:inline-flex; overflow:hidden;}
   .seg button{font-size:12px; padding:4px 11px; border:0; background:transparent; color:var(--tm);
@@ -40,12 +43,13 @@
   @keyframes rfspin{to{transform:rotate(360deg);}}
   .sub{font-size:12px; color:var(--tm); margin-top:5px;}
   .sec{padding:10px 16px 2px; font-size:12px; font-weight:600; color:var(--ts);}
+  .sec.w{color:var(--warn);} .sec.d{color:var(--up);} .sec.o{color:var(--suc);}
   .list{padding:0 16px;}
   .r{display:flex; align-items:center; justify-content:space-between; padding:5px 0;
     border-bottom:0.5px solid var(--bd); font-size:13.5px;}
   .r:last-child{border-bottom:0;}
   .tag{color:var(--tm); font-size:11px; margin-left:4px;}
-  .up{color:var(--up); font-weight:600;}
+  .up{color:var(--up); font-weight:600;} .dn{color:var(--dn); font-weight:600;}
   .amt{color:var(--tm); font-size:11px; margin-right:6px;}
   .card{margin:0 16px 8px; border:0.5px solid var(--bd); border-radius:12px; padding:9px 11px;}
   .ct{display:flex; align-items:baseline; justify-content:space-between; margin-bottom:3px;}
@@ -54,17 +58,33 @@
   .csum{font-size:11.5px; color:var(--ts); line-height:1.45; margin-bottom:7px;}
   .cs{display:flex; justify-content:space-between; padding:2.5px 0; font-size:12.5px;}
   .meta{color:var(--tm); font-size:11px;}
+  .code{color:var(--tm); font-size:11px; margin-left:5px;}
+  .days{color:var(--tm); font-size:11px; margin-left:8px;}
+  .st-on{color:var(--suc); font-size:11px;} .st-off{color:var(--tm); font-size:11px;}
+  .wr{display:flex; align-items:center; justify-content:space-between; padding:6px 0;
+    border-bottom:0.5px solid var(--bd); font-size:13.5px;}
+  .wr:last-child{border-bottom:0;}
+  .wr.rel{opacity:.5;} .wr.rel .nm{text-decoration:line-through;}
+  .wr .rt{display:flex; align-items:center; gap:4px;}
   .ft{text-align:center; color:var(--tm); font-size:11px; padding:14px 0 22px;}
   .empty{color:var(--tm); font-size:13px; padding:14px 16px;}
+  .tabbar{position:fixed; left:50%; transform:translateX(-50%); bottom:0; width:100%; max-width:480px;
+    display:flex; background:var(--scr); border-top:0.5px solid var(--bd); z-index:10;}
+  .tabbar button{flex:1; border:0; background:transparent; color:var(--tm); cursor:pointer;
+    font-family:inherit; font-size:11px; padding:7px 0 calc(9px + env(safe-area-inset-bottom));
+    display:flex; flex-direction:column; align-items:center; gap:3px;}
+  .tabbar button.on{color:var(--tp);}
+  .tabbar .ico{font-size:18px; line-height:1;}
+  .hide{display:none;}
 </style>
 </head>
 <body>
 <div class="wrap">
   <div class="hd">
     <div class="hrow">
-      <div class="title">마켓중심 <span class="live"><span class="dot"></span>실시간</span></div>
+      <div class="title">마켓중심 <span id="badge" class="live"><span class="dot"></span>실시간</span></div>
       <div class="hd-right">
-        <button id="refreshBtn" class="rfs" title="전체 새로고침" aria-label="새로고침">↻</button>
+        <button id="refreshBtn" class="rfs" title="새로고침" aria-label="새로고침">↻</button>
         <div class="seg">
           <button data-t="light">라이트</button>
           <button data-t="dark" class="on">다크</button>
@@ -74,13 +94,30 @@
     <div class="sub" id="sub">불러오는 중…</div>
   </div>
 
-  <div class="sec">상한가</div>
-  <div class="list" id="upper"></div>
+  <!-- ── 테마 탭: 상한가 + 테마 ── -->
+  <div id="viewTheme">
+    <div class="sec">상한가</div>
+    <div class="list" id="upper"></div>
+    <div class="sec">테마</div>
+    <div id="themes"></div>
+    <div class="ft" id="foot"></div>
+  </div>
 
-  <div class="sec">테마</div>
-  <div id="themes"></div>
+  <!-- ── 투경 탭: KRX 시장경보 ── -->
+  <div id="viewWarn" class="hide">
+    <div class="sec w">투자경고종목</div>
+    <div class="list" id="warnList"></div>
+    <div class="sec d">투자위험종목</div>
+    <div class="list" id="dangerList"></div>
+    <div class="sec o">단기과열종목</div>
+    <div class="list" id="overList"></div>
+    <div class="ft" id="warnFoot"></div>
+  </div>
 
-  <div class="ft" id="foot"></div>
+  <div class="tabbar">
+    <button id="tabTheme" class="on"><span class="ico">📊</span><span>테마</span></button>
+    <button id="tabWarn"><span class="ico">⚠️</span><span>투경</span></button>
+  </div>
 </div>
 
 <script>
@@ -109,12 +146,11 @@
     return h>=100 ? '시총'+h+'억대' : '시총'+cap+'억';
   }
 
+  // ── 테마 탭 렌더 ──
   var lastUpdated='';
-  function render(d){
+  function renderTheme(d){
     lastUpdated = d.updated||'';
-    document.getElementById('sub').innerHTML =
-      '상한가 <b style="color:var(--up)">'+d.upper.length+'</b> · 테마 <b>'+d.themes.length+'</b> · '+esc(d.updated||'-');
-
+    if(tab==='theme') setThemeSub(d);
     var u=document.getElementById('upper');
     if(!d.upper.length){ u.innerHTML='<div class="empty">현재 상한가 종목이 없습니다.</div>'; }
     else{
@@ -123,7 +159,6 @@
         return '<div class="r"><span>'+esc(s.name)+tag+'</span><span>'+amt(s.amount)+'<span class="up">'+pct(s.rate)+'</span></span></div>';
       }).join('');
     }
-
     var th=document.getElementById('themes');
     if(!d.themes.length){ th.innerHTML='<div class="empty">분석된 테마가 없습니다.</div>'; }
     else{
@@ -141,42 +176,108 @@
           '</span><span class="cnt">'+total+g.stocks.length+'종목</span></div>'+sum+rows+'</div>';
       }).join('');
     }
-
     document.getElementById('foot').textContent = '마지막 업데이트 '+(d.updated||'-')+' · 1분마다 시세 갱신 · 3분마다 테마 재분석';
   }
-
-  function load(){
-    fetch('/api/data',{cache:'no-store'})
-      .then(function(r){return r.json();})
-      .then(render)
-      .catch(function(){ document.getElementById('sub').textContent='데이터를 불러오지 못했습니다.'; });
+  function setThemeSub(d){
+    document.getElementById('sub').innerHTML =
+      '상한가 <b style="color:var(--up)">'+d.upper.length+'</b> · 테마 <b>'+d.themes.length+'</b> · '+esc(d.updated||'-');
   }
-  load();
-  setInterval(load, 60000);
 
-  // ── 수동 새로고침 버튼 (상한가+테마 전체 재분석) ──
+  // ── 투경 탭 렌더 ──
+  function warnRows(arr){
+    if(!arr.length) return '<div class="empty">해당 종목이 없습니다.</div>';
+    return arr.map(function(w){
+      var st = w.released ? '<span class="st-off">'+esc(w.state)+'</span>'
+                          : '<span class="st-on">지정 중</span>';
+      var days = (w.elapsed>0) ? '<span class="days">'+w.elapsed+'일차</span>' : '';
+      return '<div class="wr'+(w.released?' rel':'')+'"><span class="nm">'+esc(w.name)+
+        '<span class="code">'+esc(w.code)+'</span></span><span class="rt">'+days+st+'</span></div>';
+    }).join('');
+  }
+  function overRows(arr){
+    if(!arr.length) return '<div class="empty">해당 종목이 없습니다.</div>';
+    return arr.map(function(o){
+      var sign = o.up ? '<span class="up">▲'+esc(o.chg)+'</span>'
+               : o.down ? '<span class="dn">▼'+esc(o.chg)+'</span>'
+               : '<span class="amt">'+esc(o.chg)+'</span>';
+      var days = (o.elapsed>0) ? '<span class="days">'+o.elapsed+'일차</span>' : '';
+      return '<div class="wr"><span class="nm">'+esc(o.name)+'<span class="code">'+esc(o.code)+
+        '</span></span><span class="rt"><span style="font-size:12px">'+esc(o.price)+'</span>'+
+        '<span style="margin-left:6px">'+sign+'</span>'+days+'</span></div>';
+    }).join('');
+  }
+  function renderWarn(a){
+    document.getElementById('warnList').innerHTML = warnRows(a.warning||[]);
+    document.getElementById('dangerList').innerHTML = warnRows(a.danger||[]);
+    document.getElementById('overList').innerHTML = overRows(a.overheat||[]);
+    var c=a.counts||{warning:0,danger:0,overheat:0};
+    if(tab==='warn'){
+      document.getElementById('sub').innerHTML =
+        '기준 '+esc(a.trade_date||'-')+' · 투경 <b style="color:var(--warn)">'+c.warning+
+        '</b> · 투위 <b style="color:var(--up)">'+c.danger+'</b> · 과열 <b>'+c.overheat+'</b>';
+    }
+    document.getElementById('warnFoot').textContent =
+      (a.updated ? '수집 '+a.updated : '아직 수집 전') + ' · 매일 장 마감 후 갱신';
+  }
+
+  // ── 데이터 로드 ──
+  var lastData=null, lastAlert=null;
+  function loadTheme(cb){
+    fetch('/api/data',{cache:'no-store'}).then(function(r){return r.json();})
+      .then(function(d){ lastData=d; renderTheme(d); if(cb)cb(d); })
+      .catch(function(){ if(tab==='theme') document.getElementById('sub').textContent='데이터를 불러오지 못했습니다.'; });
+  }
+  function loadWarn(cb){
+    fetch('/api/alert',{cache:'no-store'}).then(function(r){return r.json();})
+      .then(function(a){ lastAlert=a; renderWarn(a); if(cb)cb(a); })
+      .catch(function(){ if(tab==='warn') document.getElementById('sub').textContent='시장경보 데이터를 불러오지 못했습니다.'; });
+  }
+
+  // ── 탭 전환 ──
+  var tab='theme';
+  var badge=document.getElementById('badge');
+  function selectTab(t){
+    tab=t;
+    var isT=(t==='theme');
+    document.getElementById('viewTheme').classList.toggle('hide', !isT);
+    document.getElementById('viewWarn').classList.toggle('hide', isT);
+    document.getElementById('tabTheme').classList.toggle('on', isT);
+    document.getElementById('tabWarn').classList.toggle('on', !isT);
+    if(isT){
+      badge.className='live'; badge.innerHTML='<span class="dot"></span>실시간';
+      if(lastData) setThemeSub(lastData); else loadTheme();
+    }else{
+      badge.className='live mkt'; badge.textContent='시장경보';
+      if(lastAlert) renderWarn(lastAlert); else { document.getElementById('sub').textContent='불러오는 중…'; loadWarn(); }
+    }
+  }
+  document.getElementById('tabTheme').addEventListener('click', function(){ selectTab('theme'); });
+  document.getElementById('tabWarn').addEventListener('click', function(){ selectTab('warn'); });
+
+  // 초기 로드
+  loadTheme();
+  loadWarn();
+  setInterval(function(){ loadTheme(); }, 60000);   // 테마는 1분 자동 갱신
+
+  // ── 새로고침 버튼 (현재 탭 기준) ──
   var rbtn=document.getElementById('refreshBtn'), refreshing=false;
   function endRefresh(){ refreshing=false; rbtn.classList.remove('spin'); }
   function pollRefresh(before, n){
-    if(n>24){ endRefresh(); return; }              // ~72초 타임아웃
-    fetch('/api/data',{cache:'no-store'})
-      .then(function(r){return r.json();})
+    if(n>24){ endRefresh(); return; }
+    fetch('/api/data',{cache:'no-store'}).then(function(r){return r.json();})
       .then(function(d){
-        if(d.updated && d.updated!==before){ render(d); endRefresh(); }
+        if(d.updated && d.updated!==before){ lastData=d; renderTheme(d); endRefresh(); }
         else setTimeout(function(){ pollRefresh(before, n+1); }, 3000);
       })
       .catch(function(){ setTimeout(function(){ pollRefresh(before, n+1); }, 3000); });
   }
   rbtn.addEventListener('click', function(){
+    if(tab==='warn'){ rbtn.classList.add('spin'); loadWarn(function(){ rbtn.classList.remove('spin'); }); return; }
     if(refreshing) return;
     refreshing=true; rbtn.classList.add('spin');
     var before=lastUpdated;
-    fetch('/api/refresh',{method:'POST'})
-      .then(function(r){return r.json();})
-      .then(function(res){
-        if(res && res.status==='busy'){ endRefresh(); return; }
-        pollRefresh(before, 0);
-      })
+    fetch('/api/refresh',{method:'POST'}).then(function(r){return r.json();})
+      .then(function(res){ if(res && res.status==='busy'){ endRefresh(); return; } pollRefresh(before, 0); })
       .catch(function(){ endRefresh(); });
   });
 </script>

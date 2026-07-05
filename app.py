@@ -12,6 +12,7 @@ from flask import Flask, send_file, Response, jsonify
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 DATA_FILE = os.path.join(BASE, "data.json")
+ALERT_FILE = os.path.join(BASE, "alert.json")         # KRX 시장경보(투경 탭)
 REFRESH_FLAG = os.path.join(BASE, "refresh.flag")     # 봇 루프가 감지 → 전체 재분석
 HEARTBEAT_FILE = os.path.join(BASE, "bot.heartbeat")  # 봇 루프 생존 신호
 REFRESH_LOCK = os.path.join(BASE, "refresh.lock")     # 장외 --once 중복 실행 방지
@@ -30,6 +31,17 @@ def api_data():
         with open(DATA_FILE, encoding="utf-8") as f:
             return Response(f.read(), mimetype="application/json; charset=utf-8")
     empty = {"updated": "", "upper": [], "themes": []}
+    return Response(json.dumps(empty, ensure_ascii=False), mimetype="application/json; charset=utf-8")
+
+
+@app.route("/api/alert")
+def api_alert():
+    """KRX 시장경보(투자경고/투자위험/단기과열). krx_alert.py 가 매일 저장."""
+    if os.path.exists(ALERT_FILE):
+        with open(ALERT_FILE, encoding="utf-8") as f:
+            return Response(f.read(), mimetype="application/json; charset=utf-8")
+    empty = {"updated": "", "trade_date": "", "warning": [], "danger": [],
+             "overheat": [], "counts": {"warning": 0, "danger": 0, "overheat": 0}}
     return Response(json.dumps(empty, ensure_ascii=False), mimetype="application/json; charset=utf-8")
 
 
