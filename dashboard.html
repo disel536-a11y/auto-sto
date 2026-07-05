@@ -76,6 +76,10 @@
   .mmeta{font-size:11px; color:var(--tm); line-height:1.5;}
   .mnews{color:var(--suc); font-size:11px; text-decoration:none;}
   .mnews.no{color:var(--tm);}
+  .mtgl{display:flex; align-items:center; justify-content:center; gap:5px; padding:9px 0 5px; margin:2px 16px 0; color:var(--ts); font-size:12px; cursor:pointer; border-top:0.5px solid var(--bd);}
+  .mtgl:active{color:var(--tp);}
+  .mtgl svg{transition:transform .2s;}
+  .mtgl.open svg{transform:rotate(180deg);}
   .tabbar{position:fixed; left:50%; transform:translateX(-50%); bottom:0; width:100%; max-width:480px;
     display:flex; background:var(--scr); border-top:0.5px solid var(--bd); z-index:10;}
   .tabbar button{flex:1; border:0; background:transparent; color:var(--tm); cursor:pointer;
@@ -108,6 +112,8 @@
     <div id="match"></div>
     <div class="sec">상한가</div>
     <div class="list" id="upper"></div>
+    <div class="list" id="upperRest" style="display:none"></div>
+    <div id="upperToggle" class="mtgl" style="display:none"></div>
     <div class="sec">테마</div>
     <div id="themes"></div>
     <div class="ft" id="foot"></div>
@@ -158,6 +164,19 @@
 
   // ── 테마 탭 렌더 ──
   var lastUpdated='';
+  function upperRow(s){
+    var tag = s.theme ? '<span class="tag">'+esc(s.theme)+'</span>' : '';
+    return '<div class="r"><span>'+esc(s.name)+tag+'</span><span>'+amt(s.amount)+'<span class="up">'+pct(s.rate)+'</span></span></div>';
+  }
+  var upperExpanded=false;
+  function setUpperToggle(){
+    var ur=document.getElementById('upperRest'), ut=document.getElementById('upperToggle');
+    var n=ur.children.length;
+    ur.style.display = upperExpanded ? '' : 'none';
+    ut.className = 'mtgl'+(upperExpanded?' open':'');
+    ut.innerHTML = (upperExpanded ? '접기' : '펼치기 ('+n+')')+
+      ' <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>';
+  }
   function renderMatch(arr){
     var sec=document.getElementById('matchSec'), box=document.getElementById('match');
     if(!arr || !arr.length){ sec.style.display='none'; box.innerHTML=''; return; }
@@ -183,13 +202,15 @@
     lastUpdated = d.updated||'';
     if(tab==='theme') setThemeSub(d);
     renderMatch(d.match||[]);
-    var u=document.getElementById('upper');
-    if(!d.upper.length){ u.innerHTML='<div class="empty">현재 상한가 종목이 없습니다.</div>'; }
+    var sorted = (d.upper||[]).slice().sort(function(a,b){ return (Number(b.amount)||0)-(Number(a.amount)||0); });
+    var u=document.getElementById('upper'), ur=document.getElementById('upperRest'), ut=document.getElementById('upperToggle');
+    if(!sorted.length){ u.innerHTML='<div class="empty">현재 상한가 종목이 없습니다.</div>'; ur.innerHTML=''; ut.style.display='none'; }
     else{
-      u.innerHTML = d.upper.map(function(s){
-        var tag = s.theme ? '<span class="tag">'+esc(s.theme)+'</span>' : '';
-        return '<div class="r"><span>'+esc(s.name)+tag+'</span><span>'+amt(s.amount)+'<span class="up">'+pct(s.rate)+'</span></span></div>';
-      }).join('');
+      u.innerHTML = sorted.slice(0,3).map(upperRow).join('');
+      var rest = sorted.slice(3);
+      ur.innerHTML = rest.map(upperRow).join('');
+      if(rest.length){ ut.style.display='flex'; setUpperToggle(); }
+      else{ ut.style.display='none'; ur.style.display='none'; }
     }
     var th=document.getElementById('themes');
     if(!d.themes.length){ th.innerHTML='<div class="empty">분석된 테마가 없습니다.</div>'; }
@@ -285,6 +306,7 @@
   }
   document.getElementById('tabTheme').addEventListener('click', function(){ selectTab('theme'); });
   document.getElementById('tabWarn').addEventListener('click', function(){ selectTab('warn'); });
+  document.getElementById('upperToggle').addEventListener('click', function(){ upperExpanded=!upperExpanded; setUpperToggle(); });
 
   // 초기 로드
   loadTheme();
