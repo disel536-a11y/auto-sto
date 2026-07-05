@@ -788,30 +788,53 @@ def _news_cached(code: str, ttl: int = 300) -> list:
     return heads
 
 
+# 조건부합에서 제외할 유사테마(개별/미분류 catch-all)
+_MATCH_SKIP_THEMES = ("기타 급등주", "기타", "급등 종목")
+
+
+def _match_skip_theme(name: str) -> bool:
+    return (name in _MATCH_SKIP_THEMES) or ("개별" in name)
+
+
+def _mega_ref(name: str) -> bool:
+    """삼성전자/SK하이닉스 등 초대형 참조주(우선주 포함)는 '대금 형성'·대장 판정에서 제외."""
+    if not name:
+        return False
+    base = re.sub(r"우[AB]?$", "", name).strip()   # 삼성전자우 → 삼성전자
+    return is_excluded(name) or is_excluded(base)
+
+
 def compute_match(groups: list) -> list:
-    """조건부합: 각 테마의 상승률 1위(대장)가 대금 하한↑ + 동조 2등주 존재 시 후보.
-    상승률순 상위 MATCH_MAX개. 뉴스는 소프트(가점 아님, 링크만) — 없어도 제외 안 함."""
+    """조건부합: 테마가 형성되고(2종목 이상) 그 안에서 '누군가' 대금을 형성하면(대금 하한↑),
+    그 테마의 상승률 1위(대장)를 표시. 대장 본인 대금이 낮아도 됨(예: 상한가지만 대금 미달).
+    초대형 참조주(삼성전자(우) 등)와 개별/기타 유사테마는 제외. 상승률순 상위 MATCH_MAX개.
+    빨간 테두리 = 테마 내 대금 형성 종목의 대금 ≥ HL. 뉴스는 소프트(링크만, 없어도 제외 안 함)."""
     min_won = MATCH_AMOUNT_MIN_EOK * 1e8
     hl_won = MATCH_AMOUNT_HL_EOK * 1e8
     cands = []
     for g in groups:
-        stocks = g.get("종목", [])
-        if len(stocks) < 2:                       # 2·3등주 없는 개별주 제외
+        if _match_skip_theme(g.get("테마", "")):
             continue
-        leader = max(stocks, key=lambda m: m.get("등락률", 0))
-        amt = leader.get("거래대금", 0) or 0
-        if amt < min_won:                         # 대장 대금 하한
+        eff = [m for m in g.get("종목", []) if not _mega_ref(m.get("종목명", ""))]
+        if len(eff) < 2:                          # 2·3등주 없는 개별주 제외
             continue
-        co = [m for m in stocks if m is not leader and m.get("등락률", 0) > 0]
+        leader = max(eff, key=lambda m: m.get("등락률", 0))        # 대장 = 상승률 1위
+        former = max(eff, key=lambda m: m.get("거래대금", 0) or 0)  # 대금 형성 종목
+        amt_won = former.get("거래대금", 0) or 0
+        if amt_won < min_won:                     # 테마 내 대금 형성 안 됨 → 제외
+            continue
+        co = [m for m in eff if m is not leader and m.get("등락률", 0) > 0]
         if not co:                                # 동조(같이 오르는 종목) 없으면 제외
             continue
         cands.append({
             "name": leader["종목명"], "code": leader.get("코드", ""),
-            "rate": leader.get("등락률", 0), "amount": round(amt / 1e8),
+            "rate": leader.get("등락률", 0),
             "theme": g.get("테마", ""), "sector": leader.get("업종", ""),
             "cap": leader.get("시총억", 0),
-            "highlight": amt >= hl_won,            # 대금 3천억↑ → 빨간 테두리
-            "peers": len(co), "peer_top": co[0].get("종목명", ""),
+            "highlight": amt_won >= hl_won,        # 대금 형성 종목 3천억↑ → 빨간 테두리
+            "peers": len(co),
+            "amt_name": former.get("종목명", ""),   # 대금 형성 종목명(대장과 다를 수 있음)
+            "amt_value": round(amt_won / 1e8),     # 그 대금(억)
         })
     cands.sort(key=lambda c: c["rate"], reverse=True)
     cands = cands[:MATCH_MAX]
