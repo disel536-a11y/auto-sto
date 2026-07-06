@@ -1040,6 +1040,97 @@ def compute_match(groups: list) -> list:
     return cands
 
 
+# ─── 전일 연속 상한가(N상) 추적 ───────────────────────────
+#   매일 20:00 cron(`--close-scan`)이 그날 '마감 상한가' 종목을 수집해 연속 상한가 일수를
+#   누적 저장한다. 장중 봇은 이 파일을 읽어 각 종목에 '전일 N상'을 표기한다.
+#   예) 어제 처음 상한가 → '전일 1상', 어제까지 2연속 상한가 → '전일 2상'.
+UPPER_STREAK_FILE = os.path.join(_BASE_DIR, "upper_streak.json")
+
+# 2026 공휴일(연속 상한가 영업일 판정용) — krx_alert.py 와 동일 목록
+_HOLIDAYS_2026 = {
+    "2026-01-01", "2026-01-29", "2026-01-30", "2026-01-31", "2026-02-01",
+    "2026-02-02", "2026-03-01", "2026-05-01", "2026-05-15", "2026-08-15",
+    "2026-09-24", "2026-09-25", "2026-09-26", "2026-09-27", "2026-10-03",
+    "2026-10-09", "2026-12-25",
+}
+
+
+def _is_bday(d) -> bool:
+    return d.weekday() < 5 and d.isoformat() not in _HOLIDAYS_2026
+
+
+def _prev_bday(d):
+    d = d - timedelta(days=1)
+    while not _is_bday(d):
+        d -= timedelta(days=1)
+    return d
+
+
+def _read_streak_file() -> dict:
+    try:
+        with open(UPPER_STREAK_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def _write_streak_file(obj: dict):
+    try:
+        tmp = UPPER_STREAK_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(obj, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, UPPER_STREAK_FILE)
+    except Exception as e:
+        print(f"  [상한가연속] 저장 오류: {e}")
+
+
+def _prev_upper_streaks() -> dict:
+    """전일(직전 영업일) 마감 기준 연속 상한가 맵 {code: N}. 조건 안 맞으면 {}.
+    파일 날짜가 '오늘 기준 직전 영업일'과 정확히 일치할 때만 사용(오늘자/오래된 데이터 배제)."""
+    obj = _read_streak_file()
+    d = obj.get("date")
+    if not d:
+        return {}
+    try:
+        fdate = datetime.strptime(d, "%Y-%m-%d").date()
+    except Exception:
+        return {}
+    if fdate == _prev_bday(datetime.now().date()):
+        return obj.get("streak", {}) or {}
+    return {}
+
+
+def update_upper_streak():
+    """[20:00 cron / `--close-scan`] 오늘 '마감 상한가' 종목을 수집해 연속 상한가 일수 누적 저장.
+    - 오늘 상한가(≥UPPER_LIMIT_THRESHOLD) 종목 집합을 구한다(장 마감 후 시세 = 종가 기준).
+    - 직전 저장이 '직전 영업일'이면 연속으로 인정(+1), 아니면 1부터 새로 센다.
+    - 비영업일(주말/공휴일)에는 스킵(종가 데이터가 그대로라 중복 카운트 방지)."""
+    today = datetime.now().date()
+    if not _is_bday(today):
+        print(f"[상한가연속] {today} 비영업일 — 스킵")
+        return
+    print("[상한가연속] 마감 시세 수집 중...", flush=True)
+    market = fetch_market_data()
+    if not market["all"]:
+        print("[상한가연속] 데이터 없음 — 스킵")
+        return
+    today_upper = {code for code, s in market["all"].items()
+                   if (s.get("등락률", 0) or 0) >= UPPER_LIMIT_THRESHOLD}
+    prev = _read_streak_file()
+    prev_streak = {}
+    pd = prev.get("date")
+    if pd:
+        try:
+            if datetime.strptime(pd, "%Y-%m-%d").date() == _prev_bday(today):
+                prev_streak = prev.get("streak", {}) or {}   # 직전 영업일 → 연속 인정
+        except Exception:
+            pass
+    new_streak = {code: prev_streak.get(code, 0) + 1 for code in today_upper}
+    _write_streak_file({"date": today.isoformat(), "streak": new_streak})
+    top = sorted(new_streak.items(), key=lambda x: -x[1])[:5]
+    print(f"[상한가연속] {today} 마감 상한가 {len(today_upper)}종목 저장 (최다연속 상위: {top})")
+
+
 # 조건부합 마지막 표시 후보(고정용): 새 후보가 나오기 전까진 직전 후보를 그대로 유지
 _last_match = []
 
@@ -1047,6 +1138,7 @@ _last_match = []
 def save_dashboard_data(upper: list, theme_map: dict, groups: list):
     """웹 대시보드가 읽을 최신 결과를 data.json 으로 저장."""
     global _last_match
+    streak = _prev_upper_streaks()   # {code: 전일까지 연속 상한가 일수} — '전일 N상' 표기용
     new_match = compute_match(groups)
     if new_match:
         _last_match = new_match          # 새 후보 등장 → 교체 (= '다른 종목이 나올 때')
@@ -1059,6 +1151,8 @@ def save_dashboard_data(upper: list, theme_map: dict, groups: list):
                 c["rate"] = fr.get("등락률", c.get("rate"))
                 if fr.get("거래대금"):
                     c["amt_value"] = round((fr.get("거래대금") or 0) / 1e8)
+    for c in _last_match:
+        c["psang"] = streak.get(c.get("code", ""), 0)   # 전일 연속 상한가 일수
     data = {
         "updated": datetime.now().strftime("%Y-%m-%d %H:%M"),
         "match": _last_match,
@@ -1066,6 +1160,7 @@ def save_dashboard_data(upper: list, theme_map: dict, groups: list):
             "name": s["종목명"], "rate": s["등락률"], "market": s["시장"],
             "theme": (theme_map.get(s["코드"]) or {}).get("theme", ""),
             "amount": round(s.get("거래대금", 0) / 1e8),      # 거래대금(억원)
+            "psang": streak.get(s["코드"], 0),               # 전일 연속 상한가 일수
         } for s in upper],
         "themes": [{
             "theme": g["테마"], "summary": g.get("요약", ""),
@@ -1075,6 +1170,7 @@ def save_dashboard_data(upper: list, theme_map: dict, groups: list):
                 "sector": m.get("업종", ""), "cap": m.get("시총억", 0),
                 "flags": m.get("특이사항", []),
                 "amount": round(m.get("거래대금", 0) / 1e8),   # 거래대금(억원)
+                "psang": streak.get(m.get("코드", ""), 0),     # 전일 연속 상한가 일수
             } for m in g["종목"]],
         } for g in groups],
     }
@@ -1354,5 +1450,7 @@ if __name__ == "__main__":
         _selftest()
     elif "--once" in sys.argv:
         run_once()
+    elif "--close-scan" in sys.argv:
+        update_upper_streak()      # 매일 20:00 cron: 마감 상한가 → 연속 상한가 일수 누적
     else:
         main()

@@ -49,6 +49,8 @@
     border-bottom:0.5px solid var(--bd); font-size:13.5px;}
   .r:last-child{border-bottom:0;}
   .tag{color:var(--tm); font-size:11px; margin-left:4px;}
+  .ps{color:var(--up); font-size:10px; font-weight:600; border:0.5px solid var(--up);
+    border-radius:4px; padding:0 4px; margin-left:5px; line-height:1.6; white-space:nowrap;}
   .up{color:var(--up); font-weight:600;} .dn{color:var(--dn); font-weight:600;}
   .amt{color:var(--tm); font-size:11px; margin-right:6px;}
   .card{margin:0 16px 8px; border:0.5px solid var(--bd); border-radius:12px; padding:9px 11px;}
@@ -153,6 +155,7 @@
 
   function esc(s){var d=document.createElement('div'); d.textContent=s==null?'':String(s); return d.innerHTML;}
   function pct(r){ return '+'+Number(r).toFixed(2)+'%'; }
+  function psTag(n){ n=Number(n)||0; return n>0 ? '<span class="ps">전일 '+n+'상</span>' : ''; }
   function amt(v){ v=Number(v)||0; return v>0 ? '<span class="amt">'+v.toLocaleString()+'억</span>' : ''; }
   function sizeText(cap){
     cap=Number(cap)||0;
@@ -166,7 +169,7 @@
   var lastUpdated='';
   function upperRow(s){
     var tag = s.theme ? '<span class="tag">'+esc(s.theme)+'</span>' : '';
-    return '<div class="r"><span>'+esc(s.name)+tag+'</span><span>'+amt(s.amount)+'<span class="up">'+pct(s.rate)+'</span></span></div>';
+    return '<div class="r"><span>'+esc(s.name)+psTag(s.psang)+tag+'</span><span>'+amt(s.amount)+'<span class="up">'+pct(s.rate)+'</span></span></div>';
   }
   var upperExpanded=false;
   function setUpperToggle(){
@@ -194,7 +197,7 @@
         ? '<a class="mnews" href="'+esc(m.news_url)+'" target="_blank" rel="noopener">뉴스 있음 ↗</a>'
         : '<a class="mnews no" href="'+esc(m.news_url)+'" target="_blank" rel="noopener">뉴스 확인 ↗</a>';
       return '<div class="mcard'+(m.highlight?' hl':'')+'"><div class="mtop"><span class="mname">'+
-        esc(m.name)+' '+tag+'</span><span class="up">'+pct(m.rate)+'</span></div>'+
+        esc(m.name)+psTag(m.psang)+' '+tag+'</span><span class="up">'+pct(m.rate)+'</span></div>'+
         '<div class="mmeta">'+meta.join(' · ')+' · '+news+'</div></div>';
     }).join('');
   }
@@ -221,7 +224,7 @@
           var sz=sizeText(m.cap); if(sz) parts.push(sz);
           if(m.flags&&m.flags.length) parts=parts.concat(m.flags.map(esc));
           var meta = parts.length ? ' <span class="meta">'+parts.join('·')+'</span>' : '';
-          return '<div class="cs"><span>'+esc(m.name)+meta+'</span><span>'+amt(m.amount)+'<span class="up">'+pct(m.rate)+'</span></span></div>';
+          return '<div class="cs"><span>'+esc(m.name)+psTag(m.psang)+meta+'</span><span>'+amt(m.amount)+'<span class="up">'+pct(m.rate)+'</span></span></div>';
         }).join('');
         var sum = g.summary ? '<div class="csum">'+esc(g.summary).replace(/\n/g,' ')+'</div>' : '';
         var total = Number(g.amount)>0 ? '<span class="amt">'+Number(g.amount).toLocaleString()+'억</span> · ' : '';
