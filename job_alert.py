@@ -54,7 +54,9 @@ WANTED_KEYWORDS = ["NPU", "반도체", "시스템엔지니어", "로보틱스", 
 WANTED_LIMIT_PER_KW = 20   # 키워드당 최신 공고 수
 WANTED_MAX_DETAIL   = 40   # 상세조회(설명 확보) 최대 건수 — IP차단/속도 보호
 LINKEDIN_TERMS = ["Technical Program Manager semiconductor", "Systems Engineer NPU",
-                  "humanoid robotics program manager", "반도체 양산 PM"]
+                  "humanoid robotics program manager", "반도체 양산 PM",
+                  "systems engineer robotics", "NPU program manager"]
+LINKEDIN_MAX_DETAIL = 25    # 상세조회 최대 건수 — IP차단/속도 보호
 
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
@@ -165,34 +167,82 @@ def crawl_wanted():
 
 
 # ══════════════════════════════════════════════════
-#  크롤러 — 링크드인 (jobspy, 선택적)
+#  크롤러 — 링크드인 (게스트 검색 API, requests) — jobspy 불필요
 # ══════════════════════════════════════════════════
+import re
+
+def _html_text(x):
+    return re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", x)).strip() if x else ""
+
+def _parse_linkedin_cards(html):
+    """게스트 검색 결과 HTML → [{id,title,company,location}] (설명 제외)."""
+    rows = []
+    # 각 카드는 data-entity-urn="urn:li:jobPosting:{id}" 로 시작
+    for seg in html.split('data-entity-urn="urn:li:jobPosting:')[1:]:
+        mid = re.match(r"(\d+)", seg)
+        if not mid:
+            continue
+        jid = mid.group(1)
+        mt = re.search(r'base-search-card__title">(.*?)</h3>', seg, re.S)
+        mc = re.search(r'base-search-card__subtitle">(.*?)</h4>', seg, re.S)
+        ml = re.search(r'job-search-card__location">(.*?)</span>', seg, re.S)
+        rows.append({
+            "id": jid,
+            "title": _html_text(mt.group(1)) if mt else "",
+            "company": _html_text(mc.group(1)) if mc else "",
+            "location": _html_text(ml.group(1)) if ml else "South Korea",
+        })
+    return rows
+
+def _linkedin_search(term, start=0):
+    url = ("https://www.linkedin.com/jobs-guest/jobs/api/seeMoreJobPostings/search"
+           f"?keywords={requests.utils.quote(term)}&location=South%20Korea&start={start}")
+    r = requests.get(url, headers={"User-Agent": UA}, timeout=15)
+    r.raise_for_status()
+    return r.text
+
+def _linkedin_detail(job_id):
+    url = f"https://www.linkedin.com/jobs-guest/jobs/api/jobPosting/{job_id}"
+    r = requests.get(url, headers={"User-Agent": UA}, timeout=15)
+    r.raise_for_status()
+    m = re.search(r'show-more-less-html__markup[^>]*>(.*?)</div>', r.text, re.S)
+    return _html_text(m.group(1) if m else r.text)
+
 def crawl_linkedin():
-    """jobspy 미설치/차단 시 빈 리스트 반환(원티드만으로도 동작)."""
-    try:
-        from jobspy import scrape_jobs
-    except Exception:
-        print("  [링크드인] jobspy 미설치 — 건너뜀 (원티드만 사용)")
-        return []
-    out = []
+    """링크드인 게스트 API로 수집 → 1차 스크리닝 통과분만 상세조회로 설명 확보."""
+    listings = {}
     for term in LINKEDIN_TERMS:
         try:
-            df = scrape_jobs(site_name=["linkedin"], search_term=term,
-                             location="South Korea", results_wanted=15, hours_old=48)
-            for _, r in df.iterrows():
-                out.append({
-                    "id": f"li_{r.get('id','')}",
-                    "title": str(r.get("title", "")),
-                    "company": str(r.get("company", "")),
-                    "location": str(r.get("location", "")),
-                    "desc": str(r.get("description", ""))[:600],
-                    "source": "LinkedIn",
-                    "url": str(r.get("job_url", "")),
-                })
-            time.sleep(2.0)   # 링크드인은 특히 요청 간격을 넉넉히
+            for row in _parse_linkedin_cards(_linkedin_search(term, 0)):
+                if row["id"] not in listings:
+                    listings[row["id"]] = row
+            time.sleep(1.5)   # 요청 간격(차단 방지)
         except Exception as e:
-            print(f"  [링크드인/{term}] 오류: {e}")
-    print(f"  [링크드인] 수집 {len(out)}")
+            print(f"  [링크드인/{term}] 검색 오류: {e}")
+
+    candidates = [v for v in listings.values()
+                  if _looks_relevant(f"{v['title']} {v['company']} {v['location']}")]
+    candidates = candidates[:LINKEDIN_MAX_DETAIL]
+
+    out = []
+    for v in candidates:
+        jid = v["id"]
+        try:
+            desc = _linkedin_detail(jid)
+            time.sleep(1.0)
+        except Exception as e:
+            print(f"  [링크드인/detail {jid}] 오류: {e}")
+            desc = v["title"]
+        out.append({
+            "id": f"li_{jid}",
+            "title": v["title"],
+            "company": v["company"],
+            "location": v["location"],
+            "desc": (desc or "")[:600],
+            "source": "LinkedIn",
+            "url": f"https://www.linkedin.com/jobs/view/{jid}",
+        })
+    print(f"  [링크드인] 수집 {len(listings)} → 스크리닝 {len(candidates)} → 상세 {len(out)}")
     return out
 
 
@@ -436,6 +486,24 @@ def _selftest():
     desc = " ".join(p for p in [d["intro"], d["main_tasks"], d["requirements"], d["preferred_points"]] if p)
     assert "Azure" in desc and "IT 2년" in desc
     print("[OK] 원티드 상세 파싱: intro+main_tasks+requirements+preferred 결합")
+
+    # 2b) 링크드인 카드 파싱 (실제 게스트 HTML 구조 mock)
+    li_html = (
+        '<li><div class="base-card base-search-card job-search-card" '
+        'data-entity-urn="urn:li:jobPosting:4403422295">'
+        '<h3 class="base-search-card__title"> Systems Engineer, Semiconductor </h3>'
+        '<h4 class="base-search-card__subtitle"><a>ACME Semi</a></h4>'
+        '<span class="job-search-card__location"> Seoul, South Korea </span></div></li>'
+        '<li><div data-entity-urn="urn:li:jobPosting:4400000001">'
+        '<h3 class="base-search-card__title"> Robotics Program Manager </h3>'
+        '<h4 class="base-search-card__subtitle"><a>Robo Inc</a></h4>'
+        '<span class="job-search-card__location"> Gyeonggi, South Korea </span></div></li>'
+    )
+    cards = _parse_linkedin_cards(li_html)
+    assert len(cards) == 2, f"카드 파싱 실패: {cards}"
+    assert cards[0]["id"] == "4403422295" and "Semiconductor" in cards[0]["title"]
+    assert cards[0]["company"] == "ACME Semi" and "Seoul" in cards[0]["location"]
+    print("[OK] 링크드인 카드 파싱: id/title/company/location 추출")
 
     # 3) 메시지 포맷 + 분할
     final = [
