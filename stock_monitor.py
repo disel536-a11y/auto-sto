@@ -46,6 +46,7 @@ DATA_FILE = os.path.join(_BASE_DIR, "data.json")                     # 대시보
 REFRESH_FLAG = os.path.join(_BASE_DIR, "refresh.flag")               # 웹 새로고침 버튼 신호(봇 루프가 감지)
 HEARTBEAT_FILE = os.path.join(_BASE_DIR, "bot.heartbeat")            # 봇 루프 생존 신호(웹서버가 확인)
 REFRESH_LOCK = os.path.join(_BASE_DIR, "refresh.lock")              # 장외 --once 중복 실행 방지 락
+UPPER_TS_FILE = os.path.join(_BASE_DIR, "upper_first.json")         # 종목별 최초 상한가 진입 시각(오늘자, 조건부합 대표 선정용)
 KAKAO_TOKENS = [
     # "친구_access_token_여기에",  # (레거시) 자동갱신 안 됨. 친구는 kakao_add_friend.py 사용 권장
 ]
@@ -76,8 +77,9 @@ THEME_LLM_INTERVAL = 180
 # ── 조건부합(대시보드 테마탭 최상단) 파라미터 ──────────
 #   각 테마의 상승률 1위(=대장)가 대금 하한을 넘고, 같은 테마에 동조 상승 종목(2등주)이
 #   있으면 후보. 상승률순 상위 MATCH_MAX개만 표시. 대금이 HL 이상이면 빨간 테두리 강조.
-MATCH_AMOUNT_MIN_EOK = 1000   # 대장 최소 거래대금(억) — 장 상황 따라 조절
-MATCH_AMOUNT_HL_EOK  = 3000   # 이 값 이상이면 빨간 테두리 강조(억)
+MATCH_AMOUNT_MIN_EOK = 1000   # (테마) 대금 형성 최소 거래대금(억) — 동조주 있을 때
+MATCH_AMOUNT_HL_EOK  = 3000   # 이 값 이상이면 빨간 테두리 강조(억). '단독 급등' 노출 하한도 이 값.
+MATCH_SOLO_RATE_MIN  = 20.0   # 동조주 없이 혼자 급등한 종목을 조건부합에 띄우는 최소 상승률(%)
 MATCH_MAX            = 3      # 최대 표시 종목 수
 
 # ══════════════════════════════════════════════════
@@ -351,6 +353,57 @@ def _gemini_ready() -> bool:
     return bool(GEMINI_API_KEY) and "붙여넣기" not in GEMINI_API_KEY
 
 
+def _salvage_json(txt: str):
+    """Gemini 응답 텍스트를 최대한 관대하게 JSON 파싱.
+    1) 그대로 파싱 → 2) 마크다운 펜스 제거 후 파싱 →
+    3) 첫 '{' 부터 괄호 균형이 맞는 지점까지 잘라 파싱(후행 잡음/부분 잘림 구제).
+    실패하면 None."""
+    if not txt:
+        return None
+    txt = txt.strip()
+    try:
+        return json.loads(txt)
+    except Exception:
+        pass
+    # ```json ... ``` 펜스 제거
+    if txt.startswith("```"):
+        txt = re.sub(r"^```(?:json)?", "", txt).strip()
+        txt = re.sub(r"```$", "", txt).strip()
+        try:
+            return json.loads(txt)
+        except Exception:
+            pass
+    # 첫 '{' 부터 괄호 균형이 맞는 마지막 '}' 까지 잘라 파싱
+    start = txt.find("{")
+    if start < 0:
+        return None
+    depth = 0
+    in_str = False
+    esc = False
+    for i in range(start, len(txt)):
+        c = txt[i]
+        if in_str:
+            if esc:
+                esc = False
+            elif c == "\\":
+                esc = True
+            elif c == '"':
+                in_str = False
+        else:
+            if c == '"':
+                in_str = True
+            elif c == "{":
+                depth += 1
+            elif c == "}":
+                depth -= 1
+                if depth == 0:
+                    try:
+                        return json.loads(txt[start:i + 1])
+                    except Exception:
+                        return None
+    return None
+
+
 def gemini_json(prompt: str, retries: int = 2):
     """Gemini 호출 → JSON 파싱해서 dict/list 반환. 실패 시 None."""
     if not _gemini_ready():
@@ -362,6 +415,7 @@ def gemini_json(prompt: str, retries: int = 2):
         "generationConfig": {
             "temperature": 0.2,
             "responseMimeType": "application/json",
+            "maxOutputTokens": 8192,                    # 응답 잘림(테마 붕괴 유발) 방지
             "thinkingConfig": {"thinkingBudget": 0},   # 2.5-flash 사고모드 OFF → 속도↑
         },
     }
@@ -370,7 +424,11 @@ def gemini_json(prompt: str, retries: int = 2):
             r = requests.post(url, json=body, timeout=120)
             if r.status_code == 200:
                 txt = r.json()["candidates"][0]["content"]["parts"][0]["text"]
-                return json.loads(txt)
+                obj = _salvage_json(txt)
+                if obj is not None:
+                    return obj
+                print("  [Gemini] JSON 파싱 실패(응답 잘림 추정) — 재시도")
+                time.sleep(2)
             elif r.status_code == 429:
                 print("  [Gemini] 호출 한도(429) — 20초 대기 후 재시도")
                 time.sleep(20)
@@ -434,14 +492,90 @@ def _siztext(cap_eok: int) -> str:
     return f"시총{hund}억대" if hund >= 100 else f"시총{cap_eok}억"
 
 
+# 종목 상세정보 세션 캐시(증분 분석용): code -> {업종,사업,특이사항,핵심재료}
+#   봇은 매일 09:00 재시작(cron)되어 새로 비워지므로 하루 내에서만 재사용.
+_stock_info_cache = {}
+
+
+def _llm_enrich(stocks: list, news_map: dict) -> dict:
+    """[증분] 아직 상세정보가 없는 종목만 상세 분석. 반환 {code: info}, 실패 시 {}.
+    전체를 매번 한꺼번에 처리하지 않고 '새로 등장한 종목'만 보내므로 응답이 작아
+    잘림/실패가 줄고, 실패해도 테마 묶기(구조)는 별도로 살아남는다."""
+    if not stocks or not _gemini_ready():
+        return {}
+    blocks = []
+    for s in stocks:
+        nlines = "\n    ".join("· " + h for h in news_map.get(s["코드"], [])) or "· (관련 뉴스 없음)"
+        blocks.append(
+            f'[{s["코드"]}] {s["종목명"]} (+{s["등락률"]}%, 시총 {s.get("시총억", 0)}억)\n    {nlines}'
+        )
+    prompt = (
+        "너는 한국 증시 애널리스트다. 아래 급등 종목 각각의 최신 뉴스를 보고 종목 정보를 정리하라. "
+        "뉴스에 없는 사실은 지어내지 마라.\n"
+        "- code: 종목코드\n"
+        "- 업종: 'OO관련주' (예: 기계관련주, 화장품관련주, 이차전지관련주, 건설관련주, 레저관련주)\n"
+        "- 사업: 핵심 사업 명사구 (예: 도로안전시설물사업, 골프장사업)\n"
+        "- 특이사항: 뉴스에 명시된 것만 배열 (신규상장/투자주의종목/투자환기종목/관리종목/자금조달 진행 중/"
+        "CB발행 결정/유상증자 결정/최대주주 변경/공개매수/상장폐지 추진 등). 없으면 [].\n"
+        "- 핵심재료: 상승 핵심 재료를 구체적 수치/계약/정책을 살려 1~2문장. 뚜렷한 재료 없으면 '개별 등락'.\n\n"
+        "반드시 JSON 으로만:\n"
+        '{"items":[{"code":"","업종":"","사업":"","특이사항":[],"핵심재료":""}]}\n\n'
+        "종목 목록:\n" + "\n\n".join(blocks)
+    )
+    data = gemini_json(prompt)
+    out = {}
+    for it in (data or {}).get("items", []) or []:
+        c = str(it.get("code", "")).strip()
+        if c:
+            out[c] = it
+    return out
+
+
+def _llm_group_themes(uni: list, news_map: dict, seed_codes: set):
+    """급등 종목을 '테마로 묶기'만 수행(응답이 짧아 잘림/실패에 강함).
+    반환: [{"테마","요약","codes":[...]}, ...]  또는 실패 시 None."""
+    if not _gemini_ready():
+        return None
+    blocks = []
+    for s in uni:
+        tag = " [거래대금대장주]" if s["코드"] in seed_codes else ""
+        heads = news_map.get(s["코드"], [])[:3]
+        nl = " / ".join(heads) if heads else "(관련 뉴스 없음)"
+        sect = _stock_info_cache.get(s["코드"], {}).get("업종", "")
+        sect = f" {sect}" if sect else ""
+        blocks.append(f'[{s["코드"]}] {s["종목명"]} (+{s["등락률"]}%){sect}{tag} :: {nl}')
+    prompt = (
+        "너는 한국 증시 테마 분석가다. 아래 급등 종목들을 같은 재료/테마끼리 묶어라. "
+        "뉴스에 없는 사실은 지어내지 마라.\n"
+        "- 테마: 시장 통용 테마명 (예: 원전, 이차전지, 로봇, 호남 반도체 클러스터(지역), 신규상장 등)\n"
+        "- 요약: 그 테마가 오늘 부각된 핵심 뉴스를 2줄로(각 줄 최대 40자), '\\n' 로 구분\n"
+        "- codes: 그 테마에 속하는 종목코드 배열 (같은 재료면 반드시 함께 묶어라)\n"
+        "규칙: 같은 정책/이슈(예: 동일 지역개발, 동일 정책 수혜)로 오른 종목은 하나의 테마로 묶는다. "
+        "뚜렷한 공통 재료 없이 혼자 오른 종목들은 '개별 등락'으로 묶어라. "
+        "거래대금대장주가 포함된 테마를 우선한다. 한 종목은 한 테마에만.\n\n"
+        "반드시 JSON 으로만:\n"
+        '{"themes":[{"테마":"","요약":"1줄\\n2줄","codes":["",""]}]}\n\n'
+        "종목 목록:\n" + "\n".join(blocks)
+    )
+    data = gemini_json(prompt)
+    if not data:
+        return None
+    themes = data.get("themes")
+    return themes if themes else None
+
+
 def analyze_themes(market: dict) -> list:
     """
-    원래 6단계:
-      1) 거래대금 상위 15(제외 후) 중 상승률 10%+ = 시드(대장주)
-      2) 시드 뉴스로 테마 분류
-      3) 상승률 상위 20 중 동일 테마 편입
-      4) 테마 내 상승률 내림차순, 테마는 시드 포함/최고상승률 우선
-    반환: [{"테마": str, "요약": str(2줄), "종목": [stock(+업종/시총/사업/특이사항/핵심재료), ...]}, ...]
+    1) 거래대금 상위(제외 후) 중 상승률 10%+ = 시드(대장주)
+    2) 분석 대상 uni = 상승률 상위 20 ∪ 시드
+    3) [증분] 아직 상세정보 없는 종목만 _llm_enrich → _stock_info_cache 에 축적(순차 처리)
+    4) _llm_group_themes 로 '테마 묶기'만 별도 호출(작은 응답)
+    5) 테마 내 상승률 내림차순, 테마는 총거래대금 순
+    반환: [{"테마","요약","종목":[...],"_amount":..}, ...]
+
+    ★ 그룹핑(구조)이 실패하면 폴백 단일그룹에 '_llm_failed':True 를 실어 반환한다.
+      → main() 이 이를 감지해 '직전 정상 분류'를 유지(상승률 순서만 갱신)하고
+        다음 스캔에서 재시도한다. (테마가 한 곳에 몰리는 붕괴 방지)
     """
     risers = [s for s in market["rise"] if not is_excluded(s["종목명"])][:RISE_TOP_N]
     trans_top = [s for s in market["trans"] if not is_excluded(s["종목명"])][:TRANS_TOP_N]
@@ -459,61 +593,30 @@ def analyze_themes(market: dict) -> list:
         return []
 
     if not _gemini_ready():
-        # LLM 없으면 종목별 단순 나열 1개 그룹
+        # LLM 없으면 종목별 단순 나열 1개 그룹 (키 미설정 = 안정 상태, 재시도 신호 아님)
         members = sorted(uni, key=lambda x: x["등락률"], reverse=True)
         return [{"테마": "급등 종목", "요약": "",
-                 "종목": [{**s, "업종": "", "사업": "", "특이사항": [], "핵심재료": ""} for s in members]}]
+                 "종목": [{**s, "업종": "", "사업": "", "특이사항": [], "핵심재료": ""} for s in members],
+                 "_amount": sum(s.get("거래대금", 0) for s in members)}]
 
-    # 뉴스 수집 (종목코드 기반)
-    news_map = {}
-    for s in uni:
-        news_map[s["코드"]] = get_news_headlines(s["코드"], n=8)
-        time.sleep(0.35)
+    # 뉴스 수집 (캐시 공유: enrich·group·조건부합이 함께 사용 → 네이버 반복호출 감소)
+    news_map = {s["코드"]: _news_cached(s["코드"], ttl=170, n=6) for s in uni}
 
-    blocks = []
-    for s in uni:
-        tag = " [거래대금대장주]" if s["코드"] in seed_codes else ""
-        nlines = "\n    ".join("· " + h for h in news_map[s["코드"]]) or "· (관련 뉴스 없음)"
-        blocks.append(
-            f'[{s["코드"]}] {s["종목명"]} (+{s["등락률"]}%, 시총 {s.get("시총억", 0)}억){tag}\n    {nlines}'
-        )
+    # 3) 증분 상세분석: 캐시에 없는(새로 등장한) 종목만 → '한꺼번에' 처리하지 않음
+    need = [s for s in uni if s["코드"] not in _stock_info_cache]
+    if need:
+        print(f"  [테마] 신규 {len(need)}종목 상세분석(증분)")
+        _stock_info_cache.update(_llm_enrich(need, news_map))
 
-    prompt = (
-        "너는 한국 증시 테마 분석가다. 아래 급등 종목들의 최신 뉴스를 보고 "
-        "(1) 종목별 정보를 정리하고 (2) 같은 재료/테마끼리 묶어라. 뉴스에 없는 사실은 지어내지 마라.\n\n"
-        "[items] 각 종목:\n"
-        "- code: 종목코드\n"
-        "- 업종: 'OO관련주' (예: 기계관련주, 화장품관련주, 이차전지관련주, 건설관련주, 레저관련주)\n"
-        "- 사업: 핵심 사업 명사구 (예: 도로안전시설물사업, 골프장사업)\n"
-        "- 특이사항: 뉴스에 명시된 것만 배열 (신규상장/투자주의종목/투자환기종목/관리종목/자금조달 진행 중/"
-        "CB발행 결정/유상증자 결정/최대주주 변경/공개매수/상장폐지 추진 등). 없으면 [].\n"
-        "- 핵심재료: 상승 핵심 재료를 구체적 수치/계약/정책을 살려 1~2문장. 뚜렷한 재료 없으면 '개별 등락'.\n\n"
-        "[themes] 테마 묶음:\n"
-        "- 테마: 시장 통용 테마명 (예: 원전, 이차전지, 로봇, 호남 반도체 클러스터(지역), 신규상장 등)\n"
-        "- 요약: 그 테마가 오늘 부각된 핵심 뉴스를 2줄로(각 줄 최대 40자), '\\n' 로 구분\n"
-        "- codes: 그 테마에 속하는 종목코드 배열 (같은 재료면 반드시 함께 묶어라)\n"
-        "규칙: 같은 정책/이슈(예: 동일 지역개발, 동일 정책 수혜)로 오른 종목은 하나의 테마로 묶는다. "
-        "거래대금대장주가 포함된 테마를 우선한다. 한 종목은 한 테마에만.\n\n"
-        "반드시 JSON 으로만:\n"
-        '{"items":[{"code":"","업종":"","사업":"","특이사항":[],"핵심재료":""}],'
-        '"themes":[{"테마":"","요약":"1줄\\n2줄","codes":["",""]}]}\n\n'
-        "종목 목록:\n" + "\n\n".join(blocks)
-    )
-
-    data = gemini_json(prompt)
-    info, themes_raw = {}, []
-    if data:
-        for it in (data.get("items") or []):
-            c = str(it.get("code", "")).strip()
-            if c:
-                info[c] = it
-        themes_raw = data.get("themes") or []
-    if not themes_raw:
-        print("  [테마] LLM 테마 묶음 실패 → 단일 그룹으로 표시")
+    # 4) 테마 묶기(작은 호출) — 실패해도 상세분석 캐시는 보존
+    themes_raw = _llm_group_themes(uni, news_map, seed_codes)
+    llm_failed = themes_raw is None
+    if llm_failed:
+        print("  [테마] LLM 테마 묶음 실패 → 폴백(직전 분류 유지 신호)")
         themes_raw = [{"테마": "급등 종목", "요약": "", "codes": [s["코드"] for s in uni]}]
 
     def enrich(s):
-        it = info.get(s["코드"], {})
+        it = _stock_info_cache.get(s["코드"], {})
         flags = [str(x).strip() for x in (it.get("특이사항") or []) if str(x).strip()]
         cap = s.get("시총억", 0)
         if 0 < cap < 400 and "저시총" not in flags:
@@ -550,6 +653,8 @@ def analyze_themes(market: dict) -> list:
 
     # 테마 정렬: 총 거래대금 높은 순
     groups.sort(key=lambda g: g["_amount"], reverse=True)
+    if llm_failed and groups:
+        groups[0]["_llm_failed"] = True   # main 이 직전 분류 유지하도록 신호
     return groups
 
 
@@ -777,13 +882,14 @@ def fmt_theme(groups: list) -> str:
 _news_cache = {}   # 코드 → (조회시각, 헤드라인 리스트) : 후보 뉴스 반복조회 방지
 
 
-def _news_cached(code: str, ttl: int = 300) -> list:
-    """조건부합 후보 뉴스는 5분 캐시(매 스캔 네이버 반복호출 방지)."""
+def _news_cached(code: str, ttl: int = 300, n: int = 3) -> list:
+    """뉴스 헤드라인을 캐시(매 스캔 네이버 반복호출 방지). 조건부합·테마분석이 공유.
+    캐시된 개수가 요청 n 이상이면 재사용, 부족하면 다시 가져와 갱신."""
     now = time.time()
     hit = _news_cache.get(code)
-    if hit and now - hit[0] < ttl:
+    if hit and now - hit[0] < ttl and len(hit[1]) >= n:
         return hit[1]
-    heads = get_news_headlines(code, n=3)
+    heads = get_news_headlines(code, n=max(n, 6))
     _news_cache[code] = (now, heads)
     return heads
 
@@ -804,40 +910,128 @@ def _mega_ref(name: str) -> bool:
     return is_excluded(name) or is_excluded(base)
 
 
+# ── 종목별 최초 상한가 진입 시각 추적 (조건부합 대표 선정용) ──
+#   같은 테마에 상한가가 여러 개면 '가장 먼저 상한가를 간' 종목을 대표로 띄우기 위함.
+#   오늘자만 유지(날짜 바뀌면 리셋). --once 서브프로세스/재시작에도 살아남도록 파일에 보존.
+_upper_ts_cache = None   # {code: "HH:MM:SS"} — 오늘자 최초 상한가 진입 시각
+
+
+def _load_upper_ts() -> dict:
+    """오늘자 최초 상한가 진입 시각 맵을 로드. 날짜가 다르면 빈 맵."""
+    global _upper_ts_cache
+    if _upper_ts_cache is not None:
+        return _upper_ts_cache
+    today = datetime.now().strftime("%Y-%m-%d")
+    _upper_ts_cache = {}
+    try:
+        with open(UPPER_TS_FILE, "r", encoding="utf-8") as f:
+            obj = json.load(f)
+        if obj.get("date") == today:
+            _upper_ts_cache = dict(obj.get("ts", {}))
+    except Exception:
+        pass
+    return _upper_ts_cache
+
+
+def _record_upper_ts(members: list) -> dict:
+    """members 중 상한가(≥THRESHOLD) 종목의 '최초' 진입 시각을 기록(이미 있으면 유지).
+    변경이 있으면 파일에 저장. 반환값은 오늘자 {code: 'HH:MM:SS'} 맵."""
+    ts = _load_upper_ts()
+    now = datetime.now()
+    now_hms = now.strftime("%H:%M:%S")
+    changed = False
+    for m in members:
+        code = m.get("코드", "")
+        if not code:
+            continue
+        if (m.get("등락률", 0) or 0) >= UPPER_LIMIT_THRESHOLD and code not in ts:
+            ts[code] = now_hms          # 처음 상한가로 관측된 시각만 기록
+            changed = True
+    if changed:
+        try:
+            tmp = UPPER_TS_FILE + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump({"date": now.strftime("%Y-%m-%d"), "ts": ts},
+                          f, ensure_ascii=False, indent=2)
+            os.replace(tmp, UPPER_TS_FILE)
+        except Exception:
+            pass
+    return ts
+
+
 def compute_match(groups: list) -> list:
-    """조건부합: 테마가 형성되고(2종목 이상) 그 안에서 '누군가' 대금을 형성하면(대금 하한↑),
-    그 테마의 상승률 1위(대장)를 표시. 대장 본인 대금이 낮아도 됨(예: 상한가지만 대금 미달).
-    초대형 참조주(삼성전자(우) 등)와 개별/기타 유사테마는 제외. 상승률순 상위 MATCH_MAX개.
-    빨간 테두리 = 테마 내 대금 형성 종목의 대금 ≥ HL. 뉴스는 소프트(링크만, 없어도 제외 안 함)."""
+    """조건부합(대시보드 최상단). 두 가지 경로로 대표 종목을 뽑는다.
+    ① 테마 경로: 같은 테마에 동조주(2종목 이상)가 있고 그중 '누군가' 대금을 형성하면
+       (대금 ≥ MATCH_AMOUNT_MIN_EOK) 그 테마의 대표 종목 표시. 대표 = 상한가가 여럿이면
+       '가장 먼저 상한가 간' 종목, 아니면 상승률 1위(대장). 대장 본인 대금은 낮아도 됨.
+    ② 단독 급등 경로: 동조주 없이 혼자 크게 급등한 종목(상승률 ≥ MATCH_SOLO_RATE_MIN)은
+       **대금 ≥ MATCH_AMOUNT_HL_EOK(3천억)** 일 때만 표시(단독은 검증이 약하므로 대금 문턱↑).
+    초대형 참조주(삼성전자(우) 등)는 제외. 상승률순 상위 MATCH_MAX개.
+    빨간 테두리 = 대금 형성 종목의 대금 ≥ HL(단독 급등은 항상 강조). 뉴스는 소프트(링크만)."""
     min_won = MATCH_AMOUNT_MIN_EOK * 1e8
     hl_won = MATCH_AMOUNT_HL_EOK * 1e8
+    # 이번 스캔의 모든 상한가 종목 진입 시각 기록/로드
+    upper_ts = _record_upper_ts([m for g in groups for m in g.get("종목", [])])
     cands = []
     for g in groups:
-        if _match_skip_theme(g.get("테마", "")):
-            continue
+        theme = g.get("테마", "")
         eff = [m for m in g.get("종목", []) if not _mega_ref(m.get("종목명", ""))]
-        if len(eff) < 2:                          # 2·3등주 없는 개별주 제외
+        if not eff:
             continue
-        leader = max(eff, key=lambda m: m.get("등락률", 0))        # 대장 = 상승률 1위
-        former = max(eff, key=lambda m: m.get("거래대금", 0) or 0)  # 대금 형성 종목
-        amt_won = former.get("거래대금", 0) or 0
-        if amt_won < min_won:                     # 테마 내 대금 형성 안 됨 → 제외
+
+        # ── ① 테마 경로: 동조주 2종목↑ + 대금 형성(1000억↑) ──
+        if not _match_skip_theme(theme) and len(eff) >= 2:
+            uppers = [m for m in eff if (m.get("등락률", 0) or 0) >= UPPER_LIMIT_THRESHOLD]
+            if len(uppers) >= 2:
+                # 진입 시각이 이른 순 → 동일/미기록이면 상승률 높은 순으로 tie-break
+                leader = min(
+                    uppers,
+                    key=lambda m: (upper_ts.get(m.get("코드", ""), "99:99:99"),
+                                   -(m.get("등락률", 0) or 0)),
+                )
+            else:
+                leader = max(eff, key=lambda m: m.get("등락률", 0))    # 대장 = 상승률 1위
+            former = max(eff, key=lambda m: m.get("거래대금", 0) or 0)  # 대금 형성 종목
+            amt_won = former.get("거래대금", 0) or 0
+            co = [m for m in eff if m is not leader and m.get("등락률", 0) > 0]
+            if amt_won >= min_won and co:          # 대금 형성 + 동조주 있음
+                cands.append({
+                    "name": leader["종목명"], "code": leader.get("코드", ""),
+                    "rate": leader.get("등락률", 0),
+                    "theme": theme, "sector": leader.get("업종", ""),
+                    "cap": leader.get("시총억", 0),
+                    "highlight": amt_won >= hl_won,        # 대금 형성 종목 3천억↑ → 빨간 테두리
+                    "peers": len(co),
+                    "amt_name": former.get("종목명", ""),   # 대금 형성 종목명(대장과 다를 수 있음)
+                    "amt_value": round(amt_won / 1e8),     # 그 대금(억)
+                })
+                continue   # 이 테마는 대표 1종목으로 처리 완료
+
+        # ── ② 단독 급등 경로: 혼자 크게 급등(상승률↑) + 대금 3천억↑ 만 ──
+        #    (개별 등락/기타/1종목 테마, 또는 ①에서 동조·대금 조건 미달한 테마)
+        for m in eff:
+            amt = m.get("거래대금", 0) or 0
+            rate = m.get("등락률", 0) or 0
+            if amt >= hl_won and rate >= MATCH_SOLO_RATE_MIN:
+                cands.append({
+                    "name": m["종목명"], "code": m.get("코드", ""),
+                    "rate": rate,
+                    "theme": theme, "sector": m.get("업종", ""),
+                    "cap": m.get("시총억", 0),
+                    "highlight": True,             # 대금 3천억↑ → 항상 강조
+                    "peers": 0,                    # 동조주 없음(단독)
+                    "amt_name": m.get("종목명", ""),
+                    "amt_value": round(amt / 1e8),
+                })
+
+    # 코드 중복 제거(방어) 후 상승률순 상위 MATCH_MAX개
+    seen, uniq = set(), []
+    for c in sorted(cands, key=lambda c: c["rate"], reverse=True):
+        if c["code"] in seen:
             continue
-        co = [m for m in eff if m is not leader and m.get("등락률", 0) > 0]
-        if not co:                                # 동조(같이 오르는 종목) 없으면 제외
-            continue
-        cands.append({
-            "name": leader["종목명"], "code": leader.get("코드", ""),
-            "rate": leader.get("등락률", 0),
-            "theme": g.get("테마", ""), "sector": leader.get("업종", ""),
-            "cap": leader.get("시총억", 0),
-            "highlight": amt_won >= hl_won,        # 대금 형성 종목 3천억↑ → 빨간 테두리
-            "peers": len(co),
-            "amt_name": former.get("종목명", ""),   # 대금 형성 종목명(대장과 다를 수 있음)
-            "amt_value": round(amt_won / 1e8),     # 그 대금(억)
-        })
-    cands.sort(key=lambda c: c["rate"], reverse=True)
-    cands = cands[:MATCH_MAX]
+        seen.add(c["code"])
+        uniq.append(c)
+    cands = uniq[:MATCH_MAX]
     for c in cands:                               # 후보에만 뉴스 부착(≤3종목)
         heads = _news_cached(c["code"])
         c["news"] = bool(heads)
@@ -1045,19 +1239,31 @@ def main():
         now_ts = time.time()
         do_theme_llm = first_run or force_refresh or (now_ts - last_theme_ts >= THEME_LLM_INTERVAL)
         if do_theme_llm:
+            was_first = first_run
             groups = analyze_themes(market)
-            if groups:
+            llm_failed = bool(groups) and any(g.get("_llm_failed") for g in groups)
+            if groups and not llm_failed:
+                # 정상 분류 성공 → 채택
                 last_themes = groups
+                last_theme_ts = now_ts
+                first_run = False
                 msg = fmt_theme(groups)
                 print(msg)
-                if first_run or force_refresh:
+                if was_first or force_refresh:
                     send_kakao(msg)              # 카톡 테마 알림은 첫실행/수동새로고침 때만(도배 방지)
+            elif last_themes:
+                # LLM 실패 & 직전 정상 분류 있음 → 그대로 유지, 상승률 순서만 갱신 후 다음 스캔 재시도
+                #   (last_theme_ts 를 갱신하지 않으므로 다음 스캔에서 즉시 재분류 시도)
+                refresh_group_prices(last_themes, market)
+                print("  [테마] LLM 실패 — 직전 분류 유지(상승률 순서만 갱신), 다음 스캔 재시도")
             else:
-                print("  테마 조건 충족 종목 없음")
-            last_theme_ts = now_ts
-            first_run = False
+                # 첫 시도부터 실패 & 직전 분류 없음 → 폴백이라도 임시 표시하되 곧 재시도
+                if groups:
+                    last_themes = groups
+                    print(fmt_theme(groups))
+                print("  [테마] LLM 실패 — 임시 표시, 다음 스캔 재시도")
         else:
-            refresh_group_prices(last_themes, market)   # LLM 없이 시세만 최신화
+            refresh_group_prices(last_themes, market)   # LLM 없이 시세만 최신화(상승률 순 재정렬)
             remain = int(THEME_LLM_INTERVAL - (now_ts - last_theme_ts))
             print(f"  테마 시세만 갱신 (다음 LLM 재분류까지 {max(0, remain)}s)")
 

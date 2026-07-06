@@ -189,7 +189,7 @@
         ? '대금 '+esc(m.amt_name)+' '+Number(m.amt_value||0).toLocaleString()+'억'
         : '대금 '+Number(m.amt_value||0).toLocaleString()+'억';
       meta.push(former);
-      meta.push('동조 '+(m.peers||0)+'종목');
+      meta.push(m.peers>0 ? '동조 '+m.peers+'종목' : '단독 급등');
       var news = m.news
         ? '<a class="mnews" href="'+esc(m.news_url)+'" target="_blank" rel="noopener">뉴스 있음 ↗</a>'
         : '<a class="mnews no" href="'+esc(m.news_url)+'" target="_blank" rel="noopener">뉴스 확인 ↗</a>';
