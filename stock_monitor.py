@@ -56,7 +56,7 @@ KAKAO_ENABLED = False
 
 # ── Gemini (Google AI Studio) API 키 ────────────────
 GEMINI_API_KEY = _cfg("GEMINI_API_KEY")
-GEMINI_MODEL = "gemini-2.5-flash"   # 무료 티어 확인됨 ✓ (대안: "gemini-2.5-flash-lite")
+GEMINI_MODEL = "gemini-2.5-flash-lite"   # 무료 일일한도가 flash보다 큼 → 오후 소진 방지(대안: "gemini-2.5-flash")
 
 # 상한가 알림 기준 등락률 (%)
 UPPER_LIMIT_THRESHOLD = 29.0
@@ -69,10 +69,10 @@ RISE_TOP_N    = 20    # 상승률 상위 N개 (동일 테마 편입 대상)
 # 시세 스캔 주기 (초)  →  60 = 1분 (상한가 목록 + 테마 종목 시세를 매분 갱신)
 SCAN_INTERVAL = 60
 
-# 테마 LLM 재분류 주기 (초) → 180 = 3분
+# 테마 LLM 재분류 주기 (초) → 300 = 5분
 #   그 사이 스캔에서는 Gemini 호출 없이 기존 테마 종목의 시세만 갱신 → 무료 할당량 보호.
-#   장중 6.5시간 기준 하루 약 130회 LLM 호출(무료 한도 ~250/일 이내).
-THEME_LLM_INTERVAL = 180
+#   장중 6.5시간 기준 하루 약 78회 LLM 호출 → 오후에도 한도 소진 안 되게 여유 확보.
+THEME_LLM_INTERVAL = 300
 
 # ── 조건부합(대시보드 테마탭 최상단) 파라미터 ──────────
 #   각 테마의 상승률 1위(=대장)가 대금 하한을 넘고, 같은 테마에 동조 상승 종목(2등주)이
@@ -651,8 +651,9 @@ def analyze_themes(market: dict) -> list:
         groups.append({"테마": "기타 급등주", "요약": "", "종목": leftover,
                        "_amount": sum(m.get("거래대금", 0) for m in leftover)})
 
-    # 테마 정렬: 총 거래대금 높은 순
-    groups.sort(key=lambda g: g["_amount"], reverse=True)
+    # 테마 정렬: 개별 등락/기타 등 catch-all 은 항상 맨 아래, 나머지는 총 거래대금 높은 순
+    #   (개별 등락은 '공통 재료 없는 잡동사니'라 상위 테마로 보이면 안 됨 → 하위 고정)
+    groups.sort(key=lambda g: (_match_skip_theme(g.get("테마", "")), -g.get("_amount", 0)))
     if llm_failed and groups:
         groups[0]["_llm_failed"] = True   # main 이 직전 분류 유지하도록 신호
     return groups
@@ -1039,11 +1040,28 @@ def compute_match(groups: list) -> list:
     return cands
 
 
+# 조건부합 마지막 표시 후보(고정용): 새 후보가 나오기 전까진 직전 후보를 그대로 유지
+_last_match = []
+
+
 def save_dashboard_data(upper: list, theme_map: dict, groups: list):
     """웹 대시보드가 읽을 최신 결과를 data.json 으로 저장."""
+    global _last_match
+    new_match = compute_match(groups)
+    if new_match:
+        _last_match = new_match          # 새 후보 등장 → 교체 (= '다른 종목이 나올 때')
+    else:
+        # 고정: 새 후보가 없으면 직전 후보를 유지(사라지지 않게), 현재 시세만 갱신
+        price_map = {m.get("코드"): m for g in groups for m in g.get("종목", [])}
+        for c in _last_match:
+            fr = price_map.get(c.get("code"))
+            if fr:
+                c["rate"] = fr.get("등락률", c.get("rate"))
+                if fr.get("거래대금"):
+                    c["amt_value"] = round((fr.get("거래대금") or 0) / 1e8)
     data = {
         "updated": datetime.now().strftime("%Y-%m-%d %H:%M"),
-        "match": compute_match(groups),
+        "match": _last_match,
         "upper": [{
             "name": s["종목명"], "rate": s["등락률"], "market": s["시장"],
             "theme": (theme_map.get(s["코드"]) or {}).get("theme", ""),
