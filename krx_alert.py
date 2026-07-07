@@ -126,8 +126,11 @@ def build(warn_raw, danger_raw, over_raw, ref_day: dt.date):
     today_next = next_bday(ref_day)
 
     def elapsed(des):
+        # X일차 = 지정일부터 '조회 거래일'까지 포함한 거래일수.
+        # ref_day(수집 마감일) 기준이면 조회 당일이 빠져 1일 밀림 →
+        # 아래 today_next(=다음 영업일, 대시보드가 실제 조회되는 거래일) 기준으로 맞춤.
         d = parse_kdate(des)
-        return busday_count(d, ref_day) + 1 if d else 0
+        return busday_count(d, today_next) + 1 if d else 0
 
     def days_since_release(free):
         d = parse_kdate(free)
