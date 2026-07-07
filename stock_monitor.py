@@ -531,6 +531,14 @@ def _llm_enrich(stocks: list, news_map: dict) -> dict:
     return out
 
 
+def _clip_grade(v) -> int:
+    """재료 인지도 등급을 1~5 정수로 정규화(파싱 실패/범위밖이면 1)."""
+    try:
+        return max(1, min(5, int(round(float(v)))))
+    except (TypeError, ValueError):
+        return 1
+
+
 def _llm_group_themes(uni: list, news_map: dict, seed_codes: set):
     """급등 종목을 '테마로 묶기'만 수행(응답이 짧아 잘림/실패에 강함).
     반환: [{"테마","요약","codes":[...]}, ...]  또는 실패 시 None."""
@@ -550,11 +558,18 @@ def _llm_group_themes(uni: list, news_map: dict, seed_codes: set):
         "- 테마: 시장 통용 테마명 (예: 원전, 이차전지, 로봇, 호남 반도체 클러스터(지역), 신규상장 등)\n"
         "- 요약: 그 테마가 오늘 부각된 핵심 뉴스를 2줄로(각 줄 최대 40자), '\\n' 로 구분\n"
         "- codes: 그 테마에 속하는 종목코드 배열 (같은 재료면 반드시 함께 묶어라)\n"
+        "- 등급: 그 테마 '재료(뉴스)'가 얼마나 널리 알려졌는지 1~5 정수. 재료를 아는 청중의 크기로 판단하라.\n"
+        "    1 = 뚜렷한 뉴스/재료 없이 오름 (수급/차트만)\n"
+        "    2 = 그 종목 주주·관계자 정도만 아는 개별기업 정보 (실적 개선, 유상증자, 단일 수주공시 등)\n"
+        "    3 = 주식 좀 하는 트레이더층이 아는 재료 (그룹사 지분매각, 부품 생태계 편입, ADR 편입 등 섹터 이슈)\n"
+        "    4 = 일반 뉴스(9시뉴스)에 나올 화제성 (반도체 메가프로젝트, 유럽 폭염, 우크라이나 재건, 초전도체·양자컴 등 신기술)\n"
+        "    5 = 뉴스를 안 봐도 대중이 아는 대형 사건 (코로나, 대선, 러시아-우크라이나 전쟁 등)\n"
+        "  애매하면 재료의 '대중 인지도'가 더 넓은 쪽으로 한 단계 올려 판단하라.\n"
         "규칙: 같은 정책/이슈(예: 동일 지역개발, 동일 정책 수혜)로 오른 종목은 하나의 테마로 묶는다. "
-        "뚜렷한 공통 재료 없이 혼자 오른 종목들은 '개별 등락'으로 묶어라. "
+        "뚜렷한 공통 재료 없이 혼자 오른 종목들은 '개별 등락'으로 묶어라(등급 1). "
         "거래대금대장주가 포함된 테마를 우선한다. 한 종목은 한 테마에만.\n\n"
         "반드시 JSON 으로만:\n"
-        '{"themes":[{"테마":"","요약":"1줄\\n2줄","codes":["",""]}]}\n\n'
+        '{"themes":[{"테마":"","요약":"1줄\\n2줄","등급":3,"codes":["",""]}]}\n\n'
         "종목 목록:\n" + "\n".join(blocks)
     )
     data = gemini_json(prompt)
@@ -640,6 +655,7 @@ def analyze_themes(market: dict) -> list:
         groups.append({
             "테마": (t.get("테마") or "기타").strip(),
             "요약": (t.get("요약") or "").strip(),
+            "등급": _clip_grade(t.get("등급")),   # 재료 인지도 1~5성 (Gemini 판정)
             "종목": members,
             "_amount": sum(m.get("거래대금", 0) for m in members),   # 테마 총 거래대금
         })
@@ -1164,6 +1180,7 @@ def save_dashboard_data(upper: list, theme_map: dict, groups: list):
         } for s in upper],
         "themes": [{
             "theme": g["테마"], "summary": g.get("요약", ""),
+            "grade": _clip_grade(g.get("등급")),   # 재료 인지도 1~5성
             "amount": round(sum(m.get("거래대금", 0) for m in g["종목"]) / 1e8),  # 테마 총 거래대금(억원)
             "stocks": [{
                 "name": m["종목명"], "rate": m["등락률"],
