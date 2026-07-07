@@ -241,7 +241,7 @@
           '</span><span class="cnt">'+total+g.stocks.length+'종목</span></div>'+sum+rows+'</div>';
       }).join('');
     }
-    document.getElementById('foot').textContent = '마지막 업데이트 '+(d.updated||'-')+' · 1분마다 시세 갱신 · 3분마다 테마 재분석';
+    document.getElementById('foot').textContent = '마지막 업데이트 '+(d.updated||'-')+' · 1분마다 시세 갱신 · 10분마다 테마 재분석';
   }
   function setThemeSub(d){
     document.getElementById('sub').innerHTML =

@@ -69,10 +69,12 @@ RISE_TOP_N    = 20    # 상승률 상위 N개 (동일 테마 편입 대상)
 # 시세 스캔 주기 (초)  →  60 = 1분 (상한가 목록 + 테마 종목 시세를 매분 갱신)
 SCAN_INTERVAL = 60
 
-# 테마 LLM 재분류 주기 (초) → 300 = 5분
+# 테마 LLM 재분류 주기 (초) → 600 = 10분
 #   그 사이 스캔에서는 Gemini 호출 없이 기존 테마 종목의 시세만 갱신 → 무료 할당량 보호.
-#   장중 6.5시간 기준 하루 약 78회 LLM 호출 → 오후에도 한도 소진 안 되게 여유 확보.
-THEME_LLM_INTERVAL = 300
+#   장중 6.5시간 기준 하루 약 39사이클(사이클당 2~3콜) → 무료 분당 한도(15 RPM) 여유 확보.
+#   (2026-07-07: 5분→10분. flash-lite 무료 분당 한도 초과 429로 테마가 폴백되던 문제 완화.
+#    가격/상승률/상한가는 SCAN_INTERVAL(1분)로 계속 갱신되고, '새 테마 인지'만 최대 10분 지연.)
+THEME_LLM_INTERVAL = 600
 
 # ── 조건부합(대시보드 테마탭 최상단) 파라미터 ──────────
 #   각 테마의 상승률 1위(=대장)가 대금 하한을 넘고, 같은 테마에 동조 상승 종목(2등주)이
@@ -404,9 +406,26 @@ def _salvage_json(txt: str):
     return None
 
 
+# ── Gemini 호출 레이트 제어(무료 분당 한도 보호) ───────────────
+#   무료 flash-lite는 분당 요청 한도(RPM ~15)가 낮아, 한 스캔에서 콜이 몰리면 429가 나고
+#   재시도가 폭주하면 그날 남은 호출까지 태워 테마가 하루 종일 폴백된다. 이를 막기 위해:
+#   ① 콜 간 최소 간격(_GEMINI_MIN_GAP)을 둬 분당 한도 밑으로 유지,
+#   ② 429가 뜨면 그 자리에서 재시도하지 않고 _GEMINI_COOLDOWN 동안 모든 Gemini 콜을 전면
+#      중단(서킷브레이커) → 분당 버킷이 회복될 시간을 확보. (테마는 keep-previous로 유지)
+_GEMINI_MIN_GAP  = 4.5    # 콜 간 최소 간격(초)  → 분당 최대 ~13콜
+_GEMINI_COOLDOWN = 90.0   # 429 발생 시 전면 쿨다운(초) → 분당(60s) 버킷 회복 보장
+_gemini_last_call     = 0.0
+_gemini_cooldown_until = 0.0
+
+
 def gemini_json(prompt: str, retries: int = 2):
-    """Gemini 호출 → JSON 파싱해서 dict/list 반환. 실패 시 None."""
+    """Gemini 호출 → JSON 파싱해서 dict/list 반환. 실패 시 None.
+    분당 한도 보호: 콜 간격 확보 + 429 시 전면 쿨다운(재시도 폭주 차단)."""
+    global _gemini_last_call, _gemini_cooldown_until
     if not _gemini_ready():
+        return None
+    # 서킷브레이커: 최근 429로 쿨다운 중이면 호출 자체를 건너뜀(한도·폭주 방지)
+    if time.time() < _gemini_cooldown_until:
         return None
     url = (f"https://generativelanguage.googleapis.com/v1beta/models/"
            f"{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}")
@@ -420,6 +439,11 @@ def gemini_json(prompt: str, retries: int = 2):
         },
     }
     for attempt in range(retries + 1):
+        # 콜 간 최소 간격 유지(분당 한도 보호)
+        gap = _GEMINI_MIN_GAP - (time.time() - _gemini_last_call)
+        if gap > 0:
+            time.sleep(gap)
+        _gemini_last_call = time.time()
         try:
             r = requests.post(url, json=body, timeout=120)
             if r.status_code == 200:
@@ -430,8 +454,10 @@ def gemini_json(prompt: str, retries: int = 2):
                 print("  [Gemini] JSON 파싱 실패(응답 잘림 추정) — 재시도")
                 time.sleep(2)
             elif r.status_code == 429:
-                print("  [Gemini] 호출 한도(429) — 20초 대기 후 재시도")
-                time.sleep(20)
+                # 분당 한도 초과 — 재시도하지 않고 전면 쿨다운(폭주 차단). 다음 사이클에 재개.
+                _gemini_cooldown_until = time.time() + _GEMINI_COOLDOWN
+                print(f"  [Gemini] 분당 한도(429) — {int(_GEMINI_COOLDOWN)}초 전면 쿨다운(재시도 중단)")
+                return None
             else:
                 print(f"  [Gemini] HTTP {r.status_code}: {r.text[:200]}")
                 time.sleep(3)
