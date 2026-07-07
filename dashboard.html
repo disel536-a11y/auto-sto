@@ -44,6 +44,10 @@
   .sub{font-size:12px; color:var(--tm); margin-top:5px;}
   .sec{padding:10px 16px 2px; font-size:12px; font-weight:600; color:var(--ts);}
   .sec.w{color:var(--warn);} .sec.d{color:var(--up);} .sec.o{color:var(--suc);}
+  .sec.h{color:var(--up);} .sec.p{color:var(--dn);}
+  .halt{background:var(--up); color:#fff; font-size:10px; font-weight:600;
+    padding:1px 5px; border-radius:4px; margin-left:6px;}
+  .reason{color:var(--tm); font-size:11px;}
   .list{padding:0 16px;}
   .r{display:flex; align-items:center; justify-content:space-between; padding:5px 0;
     border-bottom:0.5px solid var(--bd); font-size:13.5px;}
@@ -136,6 +140,10 @@
     <div class="list" id="dangerList"></div>
     <div class="sec o">단기과열종목</div>
     <div class="list" id="overList"></div>
+    <div class="sec h">거래정지 종목</div>
+    <div class="list" id="haltList"></div>
+    <div class="sec p">매매거래정지 예고</div>
+    <div class="list" id="noticeList"></div>
     <div class="ft" id="warnFoot"></div>
   </div>
 
@@ -248,14 +256,39 @@
       '상한가 <b style="color:var(--up)">'+d.upper.length+'</b> · 테마 <b>'+d.themes.length+'</b> · '+esc(d.updated||'-');
   }
 
+  // ── 거래일수(X일차) 계산: 조회 시점(오늘) 기준 ──
+  // 지정일=1일차. 파일 생성 시점과 무관하게 브라우저의 오늘 날짜로 계산해
+  // 저녁 cron/당일 재실행에 따라 값이 밀리는 문제를 제거한다.
+  var KRX_HOL={'2026-01-01':1,'2026-01-29':1,'2026-01-30':1,'2026-01-31':1,'2026-02-01':1,
+    '2026-02-02':1,'2026-03-01':1,'2026-05-01':1,'2026-05-15':1,'2026-08-15':1,'2026-09-24':1,
+    '2026-09-25':1,'2026-09-26':1,'2026-09-27':1,'2026-10-03':1,'2026-10-09':1,'2026-12-25':1};
+  function _iso(dt){var m=dt.getMonth()+1,d=dt.getDate();return dt.getFullYear()+'-'+(m<10?'0'+m:m)+'-'+(d<10?'0'+d:d);}
+  function _isBday(dt){var w=dt.getDay();return w!==0&&w!==6&&!KRX_HOL[_iso(dt)];}
+  function _parseD(s){if(!s||s==='-')return null;var p=s.replace(/\//g,'-').split('-');return new Date(+p[0],+p[1]-1,+p[2]);}
+  function _prevBday(dt){var d=new Date(dt);while(!_isBday(d))d.setDate(d.getDate()-1);return d;}
+  function _busDays(a,b){var n=0,c=new Date(a);while(c<b){if(_isBday(c))n++;c.setDate(c.getDate()+1);}return n;}
+  function dayCount(des,free,haltDates){
+    var d=_parseD(des); if(!d) return 0;
+    var end=_parseD(free);            // 해제 종목: 해제일에 고정. 지정 중: 오늘(직전 영업일).
+    end=end?end:_prevBday(new Date());
+    var n=_busDays(d,end)+1;
+    if(haltDates && haltDates.length){  // 매매거래정지일(오늘 이하)은 거래일수에서 제외
+      var s=_iso(d), e=_iso(end);
+      n-=haltDates.filter(function(x){return x>=s && x<=e;}).length;
+    }
+    return n<1?1:n;
+  }
+
   // ── 투경 탭 렌더 ──
   function warnRows(arr){
     if(!arr.length) return '<div class="empty">해당 종목이 없습니다.</div>';
     return arr.map(function(w){
       var st = w.released ? '<span class="st-off">'+esc(w.state)+'</span>'
                           : '<span class="st-on">지정 중</span>';
-      var days = (w.elapsed>0) ? '<span class="days">'+w.elapsed+'일차</span>' : '';
-      return '<div class="wr'+(w.released?' rel':'')+'"><span class="nm">'+esc(w.name)+
+      var dc = dayCount(w.des, w.free, w.halt_dates);
+      var days = (dc>0) ? '<span class="days">'+dc+'일차</span>' : '';
+      var hb = w.halted ? '<span class="halt">정지</span>' : '';
+      return '<div class="wr'+(w.released?' rel':'')+'"><span class="nm">'+esc(w.name)+hb+
         '<span class="code">'+esc(w.code)+'</span></span><span class="rt">'+days+st+'</span></div>';
     }).join('');
   }
@@ -265,16 +298,37 @@
       var sign = o.up ? '<span class="up">▲'+esc(o.chg)+'</span>'
                : o.down ? '<span class="dn">▼'+esc(o.chg)+'</span>'
                : '<span class="amt">'+esc(o.chg)+'</span>';
-      var days = (o.elapsed>0) ? '<span class="days">'+o.elapsed+'일차</span>' : '';
-      return '<div class="wr"><span class="nm">'+esc(o.name)+'<span class="code">'+esc(o.code)+
+      var dc = dayCount(o.des, o.free, o.halt_dates);
+      var days = (dc>0) ? '<span class="days">'+dc+'일차</span>' : '';
+      var hb = o.halted ? '<span class="halt">정지</span>' : '';
+      return '<div class="wr"><span class="nm">'+esc(o.name)+hb+'<span class="code">'+esc(o.code)+
         '</span></span><span class="rt"><span style="font-size:12px">'+esc(o.price)+'</span>'+
         '<span style="margin-left:6px">'+sign+'</span>'+days+'</span></div>';
+    }).join('');
+  }
+  function haltRows(arr){
+    if(!arr.length) return '<div class="empty">현재 거래정지 종목이 없습니다.</div>';
+    return arr.map(function(h){
+      var code = h.code ? '<span class="code">'+esc(h.code)+'</span>' : '';
+      return '<div class="wr"><span class="nm">'+esc(h.name)+code+
+        '</span><span class="rt"><span class="reason">'+esc(h.reason||'')+'</span></span></div>';
+    }).join('');
+  }
+  function noticeRows(arr){
+    if(!arr.length) return '<div class="empty">오늘 매매거래정지 예고 공시가 없습니다.</div>';
+    return arr.map(function(n){
+      var code = n.code ? '<span class="code">'+esc(n.code)+'</span>' : '';
+      var tm = n.time ? '<span class="days">'+esc(n.time)+'</span>' : '';
+      return '<div class="wr"><span class="nm">'+esc(n.name)+code+
+        '</span><span class="rt"><span class="reason">'+esc(n.title||'')+'</span>'+tm+'</span></div>';
     }).join('');
   }
   function renderWarn(a){
     document.getElementById('warnList').innerHTML = warnRows(a.warning||[]);
     document.getElementById('dangerList').innerHTML = warnRows(a.danger||[]);
     document.getElementById('overList').innerHTML = overRows(a.overheat||[]);
+    document.getElementById('haltList').innerHTML = haltRows(a.halted||[]);
+    document.getElementById('noticeList').innerHTML = noticeRows(a.halt_notice||[]);
     var c=a.counts||{warning:0,danger:0,overheat:0};
     if(tab==='warn'){
       document.getElementById('sub').innerHTML =
