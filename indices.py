@@ -85,39 +85,24 @@ def _basic_world(symbol: str) -> dict:
     return _parse_basic(_get_json(f"https://api.stock.naver.com/index/{symbol}/basic"))
 
 
-# 환율 후보 URL(살아있는 것 자동 채택)
+# 환율 URL — api.stock 이 200(데이터가 exchangeInfo 안에 있음). 나머지는 폴백.
 _FX_URLS = [
-    "https://m.stock.naver.com/api/marketindex/exchange/FX_USDKRW",
     "https://api.stock.naver.com/marketindex/exchange/FX_USDKRW",
-    "https://m.stock.naver.com/front-api/v1/marketindex/basicInfo?category=exchange&reutersCode=FX_USDKRW",
-    "https://m.stock.naver.com/front-api/marketindex/exchange/FX_USDKRW/basic",
-    "https://polling.finance.naver.com/api/realtime/marketindex/exchange/FX_USDKRW",
+    "https://m.stock.naver.com/api/marketindex/exchange/FX_USDKRW",
 ]
-
-
-def _unwrap(j):
-    """front-api 등이 {result:{...}} / {datas:[{...}]} 로 감싸는 경우 안쪽 dict 추출."""
-    if isinstance(j, dict):
-        for k in ("result", "data", "basicInfo", "detail"):
-            if isinstance(j.get(k), dict):
-                return j[k]
-        for k in ("datas", "items", "list"):
-            v = j.get(k)
-            if isinstance(v, list) and v and isinstance(v[0], dict):
-                return v[0]
-    return j if isinstance(j, dict) else {}
 
 
 def _fx() -> dict:
     for url in _FX_URLS:
         try:
-            j = _unwrap(_get_json(url))
-            value = _f(j.get("closePrice") or j.get("value") or j.get("dealBaseRate"))
+            j = _get_json(url)
+            info = j.get("exchangeInfo") if isinstance(j.get("exchangeInfo"), dict) else j
+            value = _f(info.get("closePrice") or info.get("value") or info.get("dealBaseRate"))
             if value is None:
                 continue
-            rate = _f(j.get("fluctuationsRatio") or j.get("changeRate"))
-            d = _dir(j.get("compareToPreviousPrice"))
-            change = _f(j.get("compareToPreviousClosePrice") or j.get("changeValue") or j.get("fluctuations"))
+            rate = _f(info.get("fluctuationsRatio") or info.get("changeRate"))
+            d = _dir(info.get("fluctuationsType") or info.get("compareToPreviousPrice"))
+            change = _f(info.get("fluctuations") or info.get("compareToPreviousClosePrice") or info.get("changeValue"))
             if not d and change is not None:
                 d = 1 if change > 0 else (-1 if change < 0 else 0)
             if change is not None:
@@ -131,15 +116,11 @@ def _fx() -> dict:
     return {}
 
 
-# 투자자 순매수 후보 URL
+# 투자자 순매수 URL — /trend 가 200. 값 단위=억원(예: 개인 -13,278억).
 def _investor_urls(code):
     return [
-        f"https://m.stock.naver.com/api/index/{code}/investors",
-        f"https://m.stock.naver.com/api/index/{code}/investStockQuant",
         f"https://m.stock.naver.com/api/index/{code}/trend",
-        f"https://m.stock.naver.com/front-api/v1/index/investor?reutersCode={code}",
-        f"https://api.stock.naver.com/index/{code}/investorTrend",
-        f"https://m.stock.naver.com/api/index/{code}/investorTrend",
+        f"https://m.stock.naver.com/api/index/{code}/investors",
     ]
 
 
@@ -159,9 +140,10 @@ def _domestic_investors(code: str):
                     if k in row and row[k] not in (None, ""):
                         return _f(row[k])
                 return None
-            foreign = pick("foreignerPureBuyQuant", "foreignerNetBuy", "foreign", "frgn")
-            indiv = pick("individualPureBuyQuant", "individualNetBuy", "individual", "indi")
-            inst = pick("organizationPureBuyQuant", "organizationNetBuy", "organization", "institution", "orgn")
+            # /trend 실측 키: foreignValue / personalValue / institutionalValue (억원)
+            foreign = pick("foreignValue", "foreignerPureBuyQuant", "foreignerNetBuy", "foreign")
+            indiv = pick("personalValue", "individualPureBuyQuant", "individualNetBuy", "individual")
+            inst = pick("institutionalValue", "organizationPureBuyQuant", "organizationNetBuy", "organization")
             if foreign is None and indiv is None and inst is None:
                 continue
             return {"foreign": foreign, "individual": indiv, "institution": inst}

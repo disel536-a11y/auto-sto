@@ -422,7 +422,7 @@
       function iv(label,v){
         if(v==null) return '<div><div class="l">'+label+'</div><div class="vv">-</div></div>';
         var c=v>0?'up':(v<0?'dn':'');
-        return '<div><div class="l">'+label+'</div><div class="vv '+c+'">'+(v>0?'+':'')+Number(v).toLocaleString()+'</div></div>';
+        return '<div><div class="l">'+label+'</div><div class="vv '+c+'">'+(v>0?'+':'')+Number(v).toLocaleString()+'억</div></div>';
       }
       inv='<div class="inv">'+iv('외국인',io.foreign)+iv('개인',io.individual)+iv('기관',io.institution)+'</div>';
     }
@@ -438,10 +438,12 @@
         : '<span class="nchip">'+nm+'</span>';
     }).join('');
   }
-  // 테마 키워드 네이버 뉴스 검색 링크
-  function themeNewsLink(theme){
+  // 대장주(상승률 1위 종목) 기준 네이버 뉴스 검색 링크 — 추상적 테마명보다 검색이 정확
+  function themeNewsLink(g){
+    var stocks=g.stocks||[];
+    var lead = (stocks.length && stocks[0].name) ? stocks[0].name : g.theme;
     return '<a class="tnews" href="https://search.naver.com/search.naver?where=news&query='+
-      encodeURIComponent(theme)+'" target="_blank" rel="noopener">📰 테마 뉴스 검색 ↗</a>';
+      encodeURIComponent(lead)+'" target="_blank" rel="noopener">📰 대장주 뉴스 ('+esc(lead)+') ↗</a>';
   }
   function leadCard(g, rank){
     var gd=Number(g.grade)||0;
@@ -450,7 +452,7 @@
     var sum = g.summary ? '<div class="lsum">'+esc(g.summary).replace(/\n/g,' ')+'</div>' : '';
     return '<div class="lead'+(rank?' top':'')+'"><div class="lhd">'+rk+
       '<span class="lname">'+esc(g.theme)+gr+'</span></div>'+
-      sum+'<div class="lchips">'+stockChips(g.stocks)+'</div>'+themeNewsLink(g.theme)+'</div>';
+      sum+'<div class="lchips">'+stockChips(g.stocks)+'</div>'+themeNewsLink(g)+'</div>';
   }
   function renderNews(d){
     var idx=d.indices||[];
