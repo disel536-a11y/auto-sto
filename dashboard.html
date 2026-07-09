@@ -127,6 +127,21 @@
   .ncard .nr{font-size:12px; color:var(--ts); margin-top:5px; line-height:1.55;}
   .ncard .nnews{display:inline-block; margin-top:8px; font-size:11.5px; color:var(--dn); text-decoration:none;}
   .ncard .nnews:active{opacity:.6;}
+  /* 뉴스 탭 — 주도섹터/개별테마(뉴스 중심) */
+  .lead{margin:0 16px 9px; border:0.5px solid var(--bd); border-radius:12px; padding:11px 13px;}
+  .lead.top{border-color:rgba(255,107,102,.5);}
+  .lhd{display:flex; align-items:center; gap:7px;}
+  .lhd .rank{width:19px; height:19px; flex:none; border-radius:50%; background:var(--up); color:#fff;
+    font-size:11px; font-weight:700; display:inline-flex; align-items:center; justify-content:center;}
+  .lhd .lname{font-size:14.5px; font-weight:700;}
+  .lsum{font-size:12.5px; color:var(--ts); line-height:1.55; margin:7px 0 8px;}
+  .lchips{display:flex; flex-wrap:wrap; gap:6px;}
+  .nchip{font-size:12px; color:var(--tp); text-decoration:none; background:var(--s1);
+    border:0.5px solid var(--bd); border-radius:14px; padding:3px 10px; line-height:1.4;}
+  .nchip:active{background:var(--bd);}
+  a.nchip{color:var(--tp);}
+  .tnews{display:inline-block; margin-top:9px; font-size:11.5px; color:var(--dn); text-decoration:none; font-weight:600;}
+  .tnews:active{opacity:.6;}
 </style>
 </head>
 <body>
@@ -414,18 +429,28 @@
     return '<div class="idx"><div class="in">'+esc(x.name)+'</div><div class="iv">'+val+'</div>'+
       '<div class="ic '+cls+'">'+arrow+' '+chTxt+rtTxt+'</div>'+inv+'</div>';
   }
-  function newsStockCard(m){
-    var figs=[]; var sz=sizeText(m.cap); if(sz) figs.push(sz);
-    if(Number(m.amount)>0) figs.push('거래대금 '+Number(m.amount).toLocaleString()+'억');
-    var fig = figs.length ? '<div class="nfig">'+figs.join(' · ')+'</div>' : '';
-    var reasons=[]; if(m.sector) reasons.push(esc(m.sector));
-    if(m.flags&&m.flags.length) reasons=reasons.concat(m.flags.map(esc));
-    var rz = reasons.length ? '<div class="nr">'+reasons.join(' · ')+'</div>' : '';
-    var news = m.code
-      ? '<a class="nnews" href="https://m.stock.naver.com/domestic/stock/'+encodeURIComponent(m.code)+'/news" target="_blank" rel="noopener">종목 뉴스 ↗</a>'
-      : '';
-    return '<div class="ncard"><div class="nt"><span class="nn">'+esc(m.name)+psTag(m.psang)+
-      '</span><span class="up">'+pct(m.rate)+'</span></div>'+fig+rz+news+'</div>';
+  // 종목명 = 네이버 종목뉴스 링크 칩(숫자 없이 뉴스 중심)
+  function stockChips(stocks){
+    return (stocks||[]).map(function(m){
+      var nm = esc(m.name)+psTag(m.psang);
+      return m.code
+        ? '<a class="nchip" href="https://m.stock.naver.com/domestic/stock/'+encodeURIComponent(m.code)+'/news" target="_blank" rel="noopener">'+nm+'</a>'
+        : '<span class="nchip">'+nm+'</span>';
+    }).join('');
+  }
+  // 테마 키워드 네이버 뉴스 검색 링크
+  function themeNewsLink(theme){
+    return '<a class="tnews" href="https://search.naver.com/search.naver?where=news&query='+
+      encodeURIComponent(theme)+'" target="_blank" rel="noopener">📰 테마 뉴스 검색 ↗</a>';
+  }
+  function leadCard(g, rank){
+    var gd=Number(g.grade)||0;
+    var gr = gd>=3 ? '<span class="gr g'+gd+'">★'+gd+'</span>' : '';
+    var rk = rank ? '<span class="rank">'+rank+'</span>' : '';
+    var sum = g.summary ? '<div class="lsum">'+esc(g.summary).replace(/\n/g,' ')+'</div>' : '';
+    return '<div class="lead'+(rank?' top':'')+'"><div class="lhd">'+rk+
+      '<span class="lname">'+esc(g.theme)+gr+'</span></div>'+
+      sum+'<div class="lchips">'+stockChips(g.stocks)+'</div>'+themeNewsLink(g.theme)+'</div>';
   }
   function renderNews(d){
     var idx=d.indices||[];
@@ -433,12 +458,21 @@
       ? idx.map(idxCard).join('')
       : '<div class="empty" style="grid-column:1/-1">지수 데이터가 아직 없습니다.</div>';
     var themes=d.themes||[], ns=document.getElementById('newsStocks');
-    ns.innerHTML = themes.length
-      ? themes.map(function(g){ return '<div class="nsec">'+esc(g.theme)+'</div>'+g.stocks.map(newsStockCard).join(''); }).join('')
-      : '<div class="nsec">테마 종목</div><div class="empty">표시할 종목이 없습니다.</div>';
+    if(!themes.length){
+      ns.innerHTML='<div class="nsec">테마</div><div class="empty">분석된 테마가 없습니다.</div>';
+    }else{
+      var top=themes.slice(0,3), rest=themes.slice(3);
+      var html='<div class="nsec">주도 섹터 TOP'+top.length+'</div>';
+      html+=top.map(function(g,i){ return leadCard(g, i+1); }).join('');
+      if(rest.length){
+        html+='<div class="nsec">개별 테마 · 기타 이슈</div>';
+        html+=rest.map(function(g){ return leadCard(g, 0); }).join('');
+      }
+      ns.innerHTML=html;
+    }
     if(tab==='news')
-      document.getElementById('sub').innerHTML='지수 <b>'+idx.length+'</b> · 테마 종목 상세 · '+esc(d.updated||'-');
-    document.getElementById('newsFoot').textContent='마지막 업데이트 '+(d.updated||'-')+' · 지수 2분 · 종목 1분 갱신';
+      document.getElementById('sub').innerHTML='지수 <b>'+idx.length+'</b> · 테마 <b>'+themes.length+'</b> · 뉴스 · '+esc(d.updated||'-');
+    document.getElementById('newsFoot').textContent='마지막 업데이트 '+(d.updated||'-')+' · 테마·뉴스 중심';
   }
 
   // ── 데이터 로드 ──
