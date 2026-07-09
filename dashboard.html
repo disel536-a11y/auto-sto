@@ -39,6 +39,14 @@
     color:var(--ts); font-size:15px; cursor:pointer; font-family:inherit; line-height:1; padding:0;
     display:inline-flex; align-items:center; justify-content:center;}
   .rfs:active{background:var(--s1);}
+  .menu{position:absolute; right:16px; top:46px; background:var(--scr); border:0.5px solid var(--bd);
+    border-radius:10px; padding:6px; min-width:132px; z-index:20; display:none;
+    box-shadow:0 8px 24px rgba(0,0,0,.35);}
+  .menu.open{display:block;}
+  .menu .who{font-size:11px; color:var(--tm); padding:5px 10px 8px; border-bottom:0.5px solid var(--bd); margin-bottom:4px;}
+  .menu a{display:block; padding:8px 10px; font-size:13px; color:var(--tp); text-decoration:none; border-radius:7px;}
+  .menu a:active{background:var(--s1);}
+  .menu a.adm{color:var(--warn);}
   .rfs.spin{color:var(--suc); animation:rfspin .8s linear infinite;}
   @keyframes rfspin{to{transform:rotate(360deg);}}
   .sub{font-size:12px; color:var(--tm); margin-top:5px;}
@@ -101,6 +109,24 @@
   .tabbar button.on{color:var(--tp);}
   .tabbar .ico{font-size:18px; line-height:1;}
   .hide{display:none;}
+  /* ── 뉴스 탭 ── */
+  .idxwrap{padding:12px 16px 4px; display:grid; grid-template-columns:1fr 1fr; gap:9px;}
+  .idx{background:var(--scr); border:0.5px solid var(--bd); border-radius:12px; padding:11px 12px;}
+  .idx .in{font-size:12.5px; color:var(--ts); font-weight:600;}
+  .idx .iv{font-size:20px; font-weight:700; margin-top:3px; letter-spacing:-.3px;}
+  .idx .ic{font-size:12px; margin-top:2px; font-weight:600;}
+  .idx .inv{display:flex; gap:4px; margin-top:9px; padding-top:8px; border-top:0.5px solid var(--bd);}
+  .idx .inv div{flex:1; text-align:center;}
+  .idx .inv .l{font-size:10px; color:var(--tm);}
+  .idx .inv .vv{font-size:10.5px; font-weight:600; margin-top:1px;}
+  .nsec{padding:14px 16px 4px; font-size:12.5px; font-weight:600; color:var(--ts);}
+  .ncard{margin:0 16px 8px; border:0.5px solid var(--bd); border-radius:12px; padding:10px 12px;}
+  .ncard .nt{display:flex; align-items:baseline; justify-content:space-between; gap:8px;}
+  .ncard .nn{font-size:14.5px; font-weight:600;}
+  .ncard .nfig{font-size:11.5px; color:var(--tm); margin-top:5px;}
+  .ncard .nr{font-size:12px; color:var(--ts); margin-top:5px; line-height:1.55;}
+  .ncard .nnews{display:inline-block; margin-top:8px; font-size:11.5px; color:var(--dn); text-decoration:none;}
+  .ncard .nnews:active{opacity:.6;}
 </style>
 </head>
 <body>
@@ -110,6 +136,7 @@
       <div class="title">마켓중심 <span id="badge" class="live"><span class="dot"></span>실시간</span></div>
       <div class="hd-right">
         <button id="refreshBtn" class="rfs" title="새로고침" aria-label="새로고침">↻</button>
+        <button id="acctBtn" class="rfs" title="계정" aria-label="계정">≡</button>
         <div class="seg">
           <button data-t="light">라이트</button>
           <button data-t="dark" class="on">다크</button>
@@ -117,7 +144,24 @@
       </div>
     </div>
     <div class="sub" id="sub">불러오는 중…</div>
+    <div class="menu" id="acctMenu">
+      <div class="who" id="acctWho">…</div>
+      <a href="/admin" class="adm" id="acctAdmin" style="display:none">관리자 페이지</a>
+      <a href="/logout">로그아웃</a>
+    </div>
   </div>
+  <script>
+  (function(){
+    var btn=document.getElementById('acctBtn'), menu=document.getElementById('acctMenu');
+    btn.addEventListener('click',function(e){e.stopPropagation();menu.classList.toggle('open');});
+    document.addEventListener('click',function(){menu.classList.remove('open');});
+    menu.addEventListener('click',function(e){e.stopPropagation();});
+    fetch('/api/me').then(function(r){return r.json();}).then(function(u){
+      document.getElementById('acctWho').textContent='@'+u.username;
+      if(u.role==='admin') document.getElementById('acctAdmin').style.display='block';
+    }).catch(function(){});
+  })();
+  </script>
 
   <!-- ── 테마 탭: 상한가 + 테마 ── -->
   <div id="viewTheme">
@@ -147,9 +191,18 @@
     <div class="ft" id="warnFoot"></div>
   </div>
 
+  <!-- ── 뉴스 탭: 주요 지수 + 테마 종목 상세 ── -->
+  <div id="viewNews" class="hide">
+    <div class="sec">주요 지수</div>
+    <div class="idxwrap" id="idxWrap"></div>
+    <div id="newsStocks"></div>
+    <div class="ft" id="newsFoot"></div>
+  </div>
+
   <div class="tabbar">
     <button id="tabTheme" class="on"><svg class="ico" viewBox="0 0 24 24" width="21" height="21" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 17l5-5 4 4 9-9"/><path d="M17 7h4v4"/></svg><span>테마</span></button>
     <button id="tabWarn"><svg class="ico" viewBox="0 0 24 24" width="21" height="21" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="10.5" cy="10.5" r="6.5"/><path d="M20 20l-4.2-4.2"/></svg><span>투경</span></button>
+    <button id="tabNews"><svg class="ico" viewBox="0 0 24 24" width="21" height="21" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5h13v14H6a2 2 0 0 1-2-2V5z"/><path d="M17 8h2a1 1 0 0 1 1 1v8a2 2 0 0 1-2 2"/><path d="M7 8h7M7 11h7M7 14h4"/></svg><span>뉴스</span></button>
   </div>
 </div>
 
@@ -339,11 +392,60 @@
       (a.updated ? '수집 '+a.updated : '아직 수집 전') + ' · 매일 장 마감 후 갱신';
   }
 
+  // ── 뉴스 탭 렌더 (같은 /api/data 재사용: 지수 + 테마 종목 상세) ──
+  function idxCard(x){
+    var s = Number(x.dir)||0;
+    if(!s && x.change!=null){ s = x.change>0?1:(x.change<0?-1:0); }
+    var cls = s>0?'up':(s<0?'dn':''), arrow = s>0?'▲':(s<0?'▼':'·');
+    var pre = s>0?'+':(s<0?'-':'');
+    var val = x.value!=null ? Number(x.value).toLocaleString(undefined,{maximumFractionDigits:2}) : '-';
+    var chTxt = x.change!=null ? pre+Math.abs(Number(x.change)).toLocaleString(undefined,{maximumFractionDigits:2}) : '';
+    var rtTxt = x.rate!=null ? ' ('+pre+Math.abs(Number(x.rate)).toFixed(2)+'%)' : '';
+    var inv='';
+    if(x.investors){
+      var io=x.investors;
+      function iv(label,v){
+        if(v==null) return '<div><div class="l">'+label+'</div><div class="vv">-</div></div>';
+        var c=v>0?'up':(v<0?'dn':'');
+        return '<div><div class="l">'+label+'</div><div class="vv '+c+'">'+(v>0?'+':'')+Number(v).toLocaleString()+'</div></div>';
+      }
+      inv='<div class="inv">'+iv('외국인',io.foreign)+iv('개인',io.individual)+iv('기관',io.institution)+'</div>';
+    }
+    return '<div class="idx"><div class="in">'+esc(x.name)+'</div><div class="iv">'+val+'</div>'+
+      '<div class="ic '+cls+'">'+arrow+' '+chTxt+rtTxt+'</div>'+inv+'</div>';
+  }
+  function newsStockCard(m){
+    var figs=[]; var sz=sizeText(m.cap); if(sz) figs.push(sz);
+    if(Number(m.amount)>0) figs.push('거래대금 '+Number(m.amount).toLocaleString()+'억');
+    var fig = figs.length ? '<div class="nfig">'+figs.join(' · ')+'</div>' : '';
+    var reasons=[]; if(m.sector) reasons.push(esc(m.sector));
+    if(m.flags&&m.flags.length) reasons=reasons.concat(m.flags.map(esc));
+    var rz = reasons.length ? '<div class="nr">'+reasons.join(' · ')+'</div>' : '';
+    var news = m.code
+      ? '<a class="nnews" href="https://m.stock.naver.com/domestic/stock/'+encodeURIComponent(m.code)+'/news" target="_blank" rel="noopener">종목 뉴스 ↗</a>'
+      : '';
+    return '<div class="ncard"><div class="nt"><span class="nn">'+esc(m.name)+psTag(m.psang)+
+      '</span><span class="up">'+pct(m.rate)+'</span></div>'+fig+rz+news+'</div>';
+  }
+  function renderNews(d){
+    var idx=d.indices||[];
+    document.getElementById('idxWrap').innerHTML = idx.length
+      ? idx.map(idxCard).join('')
+      : '<div class="empty" style="grid-column:1/-1">지수 데이터가 아직 없습니다.</div>';
+    var themes=d.themes||[], ns=document.getElementById('newsStocks');
+    ns.innerHTML = themes.length
+      ? themes.map(function(g){ return '<div class="nsec">'+esc(g.theme)+'</div>'+g.stocks.map(newsStockCard).join(''); }).join('')
+      : '<div class="nsec">테마 종목</div><div class="empty">표시할 종목이 없습니다.</div>';
+    if(tab==='news')
+      document.getElementById('sub').innerHTML='지수 <b>'+idx.length+'</b> · 테마 종목 상세 · '+esc(d.updated||'-');
+    document.getElementById('newsFoot').textContent='마지막 업데이트 '+(d.updated||'-')+' · 지수 2분 · 종목 1분 갱신';
+  }
+
   // ── 데이터 로드 ──
   var lastData=null, lastAlert=null;
   function loadTheme(cb){
     fetch('/api/data',{cache:'no-store'}).then(function(r){return r.json();})
-      .then(function(d){ lastData=d; renderTheme(d); if(cb)cb(d); })
+      .then(function(d){ lastData=d; renderTheme(d); if(tab==='news') renderNews(d); if(cb)cb(d); })
       .catch(function(){ if(tab==='theme') document.getElementById('sub').textContent='데이터를 불러오지 못했습니다.'; });
   }
   function loadWarn(cb){
@@ -357,21 +459,26 @@
   var badge=document.getElementById('badge');
   function selectTab(t){
     tab=t;
-    var isT=(t==='theme');
-    document.getElementById('viewTheme').classList.toggle('hide', !isT);
-    document.getElementById('viewWarn').classList.toggle('hide', isT);
-    document.getElementById('tabTheme').classList.toggle('on', isT);
-    document.getElementById('tabWarn').classList.toggle('on', !isT);
-    if(isT){
-      badge.className='live'; badge.innerHTML='<span class="dot"></span>실시간';
-      if(lastData) setThemeSub(lastData); else loadTheme();
-    }else{
+    document.getElementById('viewTheme').classList.toggle('hide', t!=='theme');
+    document.getElementById('viewWarn').classList.toggle('hide', t!=='warn');
+    document.getElementById('viewNews').classList.toggle('hide', t!=='news');
+    document.getElementById('tabTheme').classList.toggle('on', t==='theme');
+    document.getElementById('tabWarn').classList.toggle('on', t==='warn');
+    document.getElementById('tabNews').classList.toggle('on', t==='news');
+    if(t==='warn'){
       badge.className='live mkt'; badge.textContent='시장경보';
       if(lastAlert) renderWarn(lastAlert); else { document.getElementById('sub').textContent='불러오는 중…'; loadWarn(); }
+    }else if(t==='news'){
+      badge.className='live'; badge.innerHTML='<span class="dot"></span>실시간';
+      if(lastData) renderNews(lastData); else { document.getElementById('sub').textContent='불러오는 중…'; loadTheme(); }
+    }else{
+      badge.className='live'; badge.innerHTML='<span class="dot"></span>실시간';
+      if(lastData) setThemeSub(lastData); else loadTheme();
     }
   }
   document.getElementById('tabTheme').addEventListener('click', function(){ selectTab('theme'); });
   document.getElementById('tabWarn').addEventListener('click', function(){ selectTab('warn'); });
+  document.getElementById('tabNews').addEventListener('click', function(){ selectTab('news'); });
   document.getElementById('upperToggle').addEventListener('click', function(){ upperExpanded=!upperExpanded; setUpperToggle(); });
 
   // 초기 로드
@@ -386,7 +493,7 @@
     if(n>24){ endRefresh(); return; }
     fetch('/api/data',{cache:'no-store'}).then(function(r){return r.json();})
       .then(function(d){
-        if(d.updated && d.updated!==before){ lastData=d; renderTheme(d); endRefresh(); }
+        if(d.updated && d.updated!==before){ lastData=d; renderTheme(d); if(tab==='news') renderNews(d); endRefresh(); }
         else setTimeout(function(){ pollRefresh(before, n+1); }, 3000);
       })
       .catch(function(){ setTimeout(function(){ pollRefresh(before, n+1); }, 3000); });

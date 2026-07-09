@@ -19,6 +19,31 @@ import requests
 from datetime import datetime, timedelta
 from collections import defaultdict
 
+# 지수/환율 수집(뉴스 탭 상단 카드). 없거나 실패해도 봇은 정상 동작(fail-soft).
+try:
+    import indices as _indices_mod
+except Exception:
+    _indices_mod = None
+_indices_cache = []       # 최근 수집한 지수 목록
+_indices_ts = 0.0         # 마지막 수집 시각
+INDEX_INTERVAL = 120      # 지수 갱신 주기(초) — 지수는 자주 안 변해 2분이면 충분
+
+
+def _get_indices_cached() -> list:
+    """지수 목록을 INDEX_INTERVAL 간격으로만 갱신해서 반환(과도한 네트워크 방지)."""
+    global _indices_cache, _indices_ts
+    if _indices_mod is None:
+        return _indices_cache
+    if time.time() - _indices_ts >= INDEX_INTERVAL or not _indices_cache:
+        try:
+            data = _indices_mod.fetch_indices()
+            if data:
+                _indices_cache = data
+            _indices_ts = time.time()
+        except Exception as e:
+            print(f"  [indices] 수집 오류(무시): {e}")
+    return _indices_cache
+
 # ══════════════════════════════════════════════════
 #  ✏️  설정 — 여기만 수정하면 됩니다
 # ══════════════════════════════════════════════════
@@ -1197,6 +1222,7 @@ def save_dashboard_data(upper: list, theme_map: dict, groups: list):
         c["psang"] = streak.get(c.get("code", ""), 0)   # 전일 연속 상한가 일수
     data = {
         "updated": datetime.now().strftime("%Y-%m-%d %H:%M"),
+        "indices": _get_indices_cached(),   # 뉴스 탭 상단 지수 카드(코스피/코스닥/나스닥/S&P/원달러)
         "match": _last_match,
         "upper": [{
             "name": s["종목명"], "rate": s["등락률"], "market": s["시장"],
@@ -1210,6 +1236,7 @@ def save_dashboard_data(upper: list, theme_map: dict, groups: list):
             "amount": round(sum(m.get("거래대금", 0) for m in g["종목"]) / 1e8),  # 테마 총 거래대금(억원)
             "stocks": [{
                 "name": m["종목명"], "rate": m["등락률"],
+                "code": m.get("코드", ""),                    # 종목뉴스 링크용
                 "sector": m.get("업종", ""), "cap": m.get("시총억", 0),
                 "flags": m.get("특이사항", []),
                 "amount": round(m.get("거래대금", 0) / 1e8),   # 거래대금(억원)
