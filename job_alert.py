@@ -582,6 +582,67 @@ def run(dry=False):
 
 
 # ══════════════════════════════════════════════════
+#  덤프 — 필터 통과 공고 전체를 HTML 표로 저장 (검토·필터링용)
+# ══════════════════════════════════════════════════
+def _collect_passed():
+    broad = crawl_wanted() + crawl_linkedin()
+    domestic = crawl_saramin() + crawl_jobkorea() + crawl_incruit()
+    passed = [j for j in broad if passes_filter(j)]
+    passed += [j for j in domestic if _looks_relevant(j["title"] + " " + j["desc"])]
+    seen, uniq = set(), []
+    for j in passed:
+        if j["id"] not in seen:
+            seen.add(j["id"]); uniq.append(j)
+    return uniq
+
+def dump_passed():
+    import html as _html
+    jobs = _collect_passed()
+    # 소스별 건수
+    from collections import Counter
+    cnt = Counter(j["source"] for j in jobs)
+    chips = " ".join(f'<span class="chip">{_html.escape(s)} {n}</span>' for s, n in cnt.most_common())
+    rows = ""
+    for i, j in enumerate(jobs, 1):
+        rows += (f'<tr data-src="{_html.escape(j["source"])}">'
+                 f'<td>{i}</td><td><span class="src">{_html.escape(j["source"])}</span></td>'
+                 f'<td><a href="{_html.escape(j["url"])}" target="_blank">{_html.escape(j["title"])}</a></td>'
+                 f'<td>{_html.escape(j["company"])}</td><td>{_html.escape(j["location"])}</td></tr>')
+    today = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+    doc = f"""<!doctype html><html lang="ko"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>필터 통과 공고 {len(jobs)}건</title>
+<style>
+body{{font-family:-apple-system,'Malgun Gothic',sans-serif;margin:0;background:#f6f7f9;color:#111}}
+.wrap{{max-width:1000px;margin:0 auto;padding:16px}}
+h1{{font-size:20px;margin:8px 0}}
+.chip{{display:inline-block;background:#111;color:#fff;border-radius:12px;padding:2px 10px;font-size:13px;margin:2px}}
+input{{width:100%;padding:10px;border:1px solid #ccc;border-radius:8px;font-size:15px;margin:10px 0;box-sizing:border-box}}
+table{{width:100%;border-collapse:collapse;background:#fff;border-radius:8px;overflow:hidden}}
+th,td{{padding:8px 10px;border-bottom:1px solid #eee;font-size:14px;text-align:left;vertical-align:top}}
+th{{background:#fafafa;position:sticky;top:0;cursor:pointer}}
+.src{{background:#eef;border-radius:6px;padding:1px 7px;font-size:12px;color:#334}}
+a{{color:#1a56db;text-decoration:none}} a:hover{{text-decoration:underline}}
+</style></head><body><div class="wrap">
+<h1>🔎 필터 통과 공고 {len(jobs)}건 <span style="font-size:13px;color:#888">({today} 기준)</span></h1>
+<div>{chips}</div>
+<input id="q" placeholder="제목·회사·지역·소스 검색 (예: 반도체, 성남, 잡코리아, PM)">
+<table id="t"><thead><tr><th>#</th><th>소스</th><th>제목</th><th>회사</th><th>지역</th></tr></thead>
+<tbody>{rows}</tbody></table></div>
+<script>
+const q=document.getElementById('q'),rows=[...document.querySelectorAll('#t tbody tr')];
+q.addEventListener('input',()=>{{const v=q.value.toLowerCase();rows.forEach(r=>{{r.style.display=r.textContent.toLowerCase().includes(v)?'':'none';}});}});
+document.querySelectorAll('#t th').forEach((th,i)=>th.addEventListener('click',()=>{{
+ const tb=document.querySelector('#t tbody');[...tb.rows].sort((a,b)=>a.cells[i].textContent.localeCompare(b.cells[i].textContent,'ko',{{numeric:true}})).forEach(r=>tb.appendChild(r));}}));
+</script></body></html>"""
+    path = os.path.join(_BASE_DIR, "passed_jobs.html")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(doc)
+    print(f"[dump] 필터 통과 {len(jobs)}건 → {path}")
+    print("       웹서버 재시작 후 http://<서버IP>/jobs 에서 확인")
+
+
+# ══════════════════════════════════════════════════
 #  셀프테스트 (네트워크/API 미사용)
 # ══════════════════════════════════════════════════
 def _selftest():
@@ -681,6 +742,8 @@ def _selftest():
 if __name__ == "__main__":
     if "--selftest" in sys.argv:
         _selftest()
+    elif "--dump" in sys.argv:
+        dump_passed()
     elif "--dry" in sys.argv:
         run(dry=True)
     else:
