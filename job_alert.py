@@ -41,6 +41,7 @@ _BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 ANTHROPIC_API_KEY  = _cfg("ANTHROPIC_API_KEY")
 KAKAO_REST_API_KEY = _cfg("KAKAO_REST_API_KEY")
+SARAMIN_API_KEY    = _cfg("SARAMIN_API_KEY")   # 사람인 오픈API 액세스키(없으면 사람인 건너뜀)
 KAKAO_TOKEN_FILE   = os.path.join(_BASE_DIR, "kakao_token.json")     # auto-sto가 만든 본인 토큰 재사용
 SEEN_DB            = os.path.join(_BASE_DIR, "job_alert_seen.db")    # 중복제거 SQLite
 
@@ -58,6 +59,11 @@ LINKEDIN_TERMS = ["Technical Program Manager semiconductor", "Systems Engineer N
                   "systems engineer robotics", "NPU program manager"]
 LINKEDIN_MAX_DETAIL = 25    # 상세조회 최대 건수 — IP차단/속도 보호
 
+# 국내 잡보드(사람인/잡코리아/인크루트) 검색 키워드 — 도메인·직무 타겟팅
+DOMESTIC_KEYWORDS = ["반도체 시스템 엔지니어", "NPU", "반도체 PM", "로보틱스 엔지니어",
+                     "자율주행 시스템", "반도체 양산", "휴머노이드", "프로그램 매니저 반도체"]
+SCORE_MAX = 30              # 하루 AI 평가 상한(토큰·비용 보호)
+
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
 
@@ -67,8 +73,11 @@ UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
 # ══════════════════════════════════════════════════
 PROFILE = {
     "keywords_role": ["technical program manager", "tpm", "systems engineer", "system engineer",
-                      "npi", "양산", "mass production", "operation", "opm", "program manager",
-                      "시스템 엔지니어", "시스템엔지니어", "프로그램 매니저", "pm"],
+                      "npi", "양산", "mass production", "operation", "opm",
+                      "program manager", "program management", "project manager", "project management",
+                      "project/program", "technical project", "pmo", "product manager",
+                      "시스템 엔지니어", "시스템엔지니어", "프로그램 매니저", "프로그램 관리",
+                      "프로젝트 매니저", "프로젝트 관리", "프로덕트 매니저", "pm"],
     "keywords_domain": ["npu", "semiconductor", "반도체", "ai chip", "humanoid", "휴머노이드",
                         "robotics", "로보틱스", "로봇", "evtol", "autonomous", "자율주행",
                         "mobility", "모빌리티", "soc", "ai 반도체"],
@@ -247,6 +256,100 @@ def crawl_linkedin():
 
 
 # ══════════════════════════════════════════════════
+#  크롤러 — 사람인 (공식 오픈API, JSON)
+# ══════════════════════════════════════════════════
+def crawl_saramin():
+    if not SARAMIN_API_KEY:
+        print("  [사람인] SARAMIN_API_KEY 미설정 — 건너뜀")
+        return []
+    out, seen = [], set()
+    for kw in DOMESTIC_KEYWORDS:
+        try:
+            url = ("https://oapi.saramin.co.kr/job-search"
+                   f"?access-key={SARAMIN_API_KEY}&keywords={requests.utils.quote(kw)}"
+                   "&count=20&sort=pd")
+            r = requests.get(url, headers={"Accept": "application/json"}, timeout=15)
+            r.raise_for_status()
+            jobs = r.json().get("jobs", {}).get("job", [])
+            if isinstance(jobs, dict):
+                jobs = [jobs]
+            for j in jobs:
+                jid = str(j.get("id", ""))
+                if not jid or jid in seen:
+                    continue
+                seen.add(jid)
+                pos = j.get("position", {})
+                out.append({
+                    "id": f"sr_{jid}",
+                    "title": pos.get("title", ""),
+                    "company": j.get("company", {}).get("detail", {}).get("name", ""),
+                    "location": (pos.get("location", {}) or {}).get("name", "") or "대한민국",
+                    "desc": f'{pos.get("title","")} {(pos.get("job-code",{}) or {}).get("name","")} '
+                            f'{(pos.get("industry",{}) or {}).get("name","")}',
+                    "source": "사람인",
+                    "url": j.get("url", f"https://www.saramin.co.kr/zf_user/jobs/view?rec_idx={jid}"),
+                })
+            time.sleep(0.5)
+        except Exception as e:
+            print(f"  [사람인/{kw}] 오류: {e}")
+    print(f"  [사람인] 수집 {len(out)}")
+    return out
+
+
+# ══════════════════════════════════════════════════
+#  크롤러 — 잡코리아 (검색페이지 스크래핑)
+# ══════════════════════════════════════════════════
+def crawl_jobkorea():
+    out, best = [], {}   # jid -> 가장 긴 제목(제목 링크)
+    for kw in DOMESTIC_KEYWORDS:
+        try:
+            url = f"https://www.jobkorea.co.kr/Search/?stext={requests.utils.quote(kw)}&tabType=recruit"
+            r = requests.get(url, headers={"User-Agent": UA}, timeout=15)
+            r.raise_for_status()
+            for m in re.finditer(r'GI_Read/(\d+)[^"]*"[^>]*>([\s\S]*?)</a>', r.text):
+                jid = m.group(1)
+                title = _html_text(m.group(2))
+                if title and len(title) > 3 and len(title) > len(best.get(jid, "")):
+                    best[jid] = title
+            time.sleep(1.0)
+        except Exception as e:
+            print(f"  [잡코리아/{kw}] 오류: {e}")
+    for jid, title in best.items():
+        out.append({"id": f"jk_{jid}", "title": title, "company": "",
+                    "location": "대한민국", "desc": title, "source": "잡코리아",
+                    "url": f"https://www.jobkorea.co.kr/Recruit/GI_Read/{jid}"})
+    print(f"  [잡코리아] 수집 {len(out)}")
+    return out
+
+
+# ══════════════════════════════════════════════════
+#  크롤러 — 인크루트 (검색페이지 스크래핑, EUC-KR)
+# ══════════════════════════════════════════════════
+def crawl_incruit():
+    out, best = [], {}
+    for kw in DOMESTIC_KEYWORDS:
+        try:
+            kw_euc = requests.utils.quote(kw, encoding="euc-kr")
+            url = f"https://search.incruit.com/list/search.asp?col=job&kw={kw_euc}"
+            r = requests.get(url, headers={"User-Agent": UA}, timeout=15)
+            r.encoding = "euc-kr"
+            for m in re.finditer(r'jobpost\.asp\?job=(\d+)[^"]*"[^>]*>([\s\S]*?)</a>', r.text):
+                jid = m.group(1)
+                title = _html_text(m.group(2))
+                if title and len(title) > 3 and len(title) > len(best.get(jid, "")):
+                    best[jid] = title
+            time.sleep(1.0)
+        except Exception as e:
+            print(f"  [인크루트/{kw}] 오류: {e}")
+    for jid, title in best.items():
+        out.append({"id": f"ic_{jid}", "title": title, "company": "",
+                    "location": "대한민국", "desc": title, "source": "인크루트",
+                    "url": f"https://job.incruit.com/jobdb_info/jobpost.asp?job={jid}"})
+    print(f"  [인크루트] 수집 {len(out)}")
+    return out
+
+
+# ══════════════════════════════════════════════════
 #  이력서 맥락 배치 스코어링 (Claude API, 하루 1회)
 # ══════════════════════════════════════════════════
 RESUME_PROFILE = """지원자: 김봉수 (System Engineer / Technical PM, 13년+)
@@ -420,20 +523,29 @@ def run(dry=False):
     print(f"  Claude API: {'OK' if ANTHROPIC_API_KEY else '미설정 ✗'} | 임계값 {ALERT_MIN}점 | dry={dry}")
     print("=" * 52)
 
-    print("① 크롤링 (원티드 + 링크드인)...", flush=True)
-    raw = crawl_wanted() + crawl_linkedin()
-    print(f"   총 수집 {len(raw)}건", flush=True)
-    if not raw:
+    print("① 크롤링 (원티드+링크드인 / 사람인+잡코리아+인크루트)...", flush=True)
+    broad = crawl_wanted() + crawl_linkedin()          # 광범위 검색 → 엄격 필터
+    domestic = crawl_saramin() + crawl_jobkorea() + crawl_incruit()  # 타겟 검색 → 완화 필터
+    print(f"   총 수집 {len(broad) + len(domestic)}건 (광범위 {len(broad)} / 국내보드 {len(domestic)})", flush=True)
+    if not broad and not domestic:
         print("   수집 0건 — 종료"); return
 
-    print("② 1차 필터 (지역/직무/도메인)...", flush=True)
-    passed = [j for j in raw if passes_filter(j)]
+    print("② 필터 (광범위=엄격 3중 / 국내보드=타겟검색이라 완화)...", flush=True)
+    # 광범위 소스: 지역·직무·도메인 3중 필터. 국내보드: 이미 도메인 검색이라 role/domain 하나만 봐도 통과
+    passed = [j for j in broad if passes_filter(j)]
+    passed += [j for j in domestic if _looks_relevant(j["title"] + " " + j["desc"])]
+    # id 기준 중복 제거
+    _seen, _uniq = set(), []
+    for j in passed:
+        if j["id"] not in _seen:
+            _seen.add(j["id"]); _uniq.append(j)
+    passed = _uniq
     print(f"   통과 {len(passed)}건", flush=True)
     if not passed:
         print("   필터 통과 0건 — 종료"); return
-    if len(passed) > 30:   # 토큰 한도 보호 — 하루 상위 30건만 평가
-        print(f"   평가 대상 30건으로 제한 (통과 {len(passed)}건 중)", flush=True)
-        passed = passed[:30]
+    if len(passed) > SCORE_MAX:   # 토큰·비용 보호
+        print(f"   평가 대상 {SCORE_MAX}건으로 제한 (통과 {len(passed)}건 중)", flush=True)
+        passed = passed[:SCORE_MAX]
 
     if not ANTHROPIC_API_KEY:
         print("   ANTHROPIC_API_KEY 미설정 — 평가 불가, 종료"); return
@@ -510,6 +622,28 @@ def _selftest():
     assert cards[0]["id"] == "4403422295" and "Semiconductor" in cards[0]["title"]
     assert cards[0]["company"] == "ACME Semi" and "Seoul" in cards[0]["location"]
     print("[OK] 링크드인 카드 파싱: id/title/company/location 추출")
+
+    # 2c) 확장된 role 키워드로 'Program Management/Project' 공고 회수 확인
+    am = {"title": "Technical Project/Program Management", "company": "Applied Materials Korea",
+          "location": "Hwaseong, Gyeonggi, South Korea",
+          "desc": "materials engineering to produce every new chip and semiconductor. "
+                  "Helps to prepare project plan and coordinates project schedule."}
+    assert passes_filter(am), "Applied Materials TPM 공고가 여전히 필터에서 탈락"
+    print("[OK] role 확장: 'Program Management/Project' 공고 필터 통과")
+
+    # 2d) 잡코리아/인크루트 검색페이지 정규식 파싱
+    jk_html = ('<a href="/Recruit/GI_Read/49362247?x=1" class="logo"><img></a>'
+               '<a href="/Recruit/GI_Read/49362247?y=2">[병특포함]ML Systems Engineer</a>')
+    jk = {}
+    for m in re.finditer(r'GI_Read/(\d+)[^"]*"[^>]*>([\s\S]*?)</a>', jk_html):
+        t = _html_text(m.group(2))
+        if t and len(t) > 3 and len(t) > len(jk.get(m.group(1), "")):
+            jk[m.group(1)] = t
+    assert jk.get("49362247") == "ML Systems Engineer".rjust(0) or "Systems Engineer" in jk.get("49362247", "")
+    ic_html = '<a href="/jobdb_info/jobpost.asp?job=2607050000205&src=x">반도체 설계 엔지니어</a>'
+    icm = re.search(r'jobpost\.asp\?job=(\d+)[^"]*"[^>]*>([\s\S]*?)</a>', ic_html)
+    assert icm and icm.group(1) == "2607050000205" and "반도체" in _html_text(icm.group(2))
+    print("[OK] 잡코리아/인크루트 정규식: id·제목 추출")
 
     # 3) 메시지 포맷 + 분할
     final = [
