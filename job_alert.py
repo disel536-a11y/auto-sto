@@ -299,23 +299,37 @@ def crawl_saramin():
 # ══════════════════════════════════════════════════
 #  크롤러 — 잡코리아 (검색페이지 스크래핑)
 # ══════════════════════════════════════════════════
+_CO_PAT = re.compile(r'㈜|\(주\)|\(유\)|주식회사|\bInc\b|\bCorp\b|㈔', re.I)
+
+def _pick_company(texts, title):
+    """한 공고의 여러 앵커 텍스트 중 회사명 골라내기(제목 제외)."""
+    others = [t for t in texts if t and t != title]
+    for t in others:                       # 1) ㈜/(주) 등 회사 표기 우선
+        if _CO_PAT.search(t):
+            return re.sub(r'\s*로고$', '', t).strip()
+    short = [t for t in others if 1 < len(t) <= 20]   # 2) 제목보다 짧은 후보
+    return min(short, key=len) if short else ""
+
 def crawl_jobkorea():
-    out, best = [], {}   # jid -> 가장 긴 제목(제목 링크)
+    out, texts = [], {}   # jid -> set(앵커 텍스트들)  (제목·회사 모두 같은 GI_Read 링크)
     for kw in DOMESTIC_KEYWORDS:
         try:
             url = f"https://www.jobkorea.co.kr/Search/?stext={requests.utils.quote(kw)}&tabType=recruit"
             r = requests.get(url, headers={"User-Agent": UA}, timeout=15)
             r.raise_for_status()
             for m in re.finditer(r'GI_Read/(\d+)[^"]*"[^>]*>([\s\S]*?)</a>', r.text):
-                jid = m.group(1)
-                title = _html_text(m.group(2))
-                if title and len(title) > 3 and len(title) > len(best.get(jid, "")):
-                    best[jid] = title
+                t = _html_text(m.group(2))
+                if t and len(t) > 1:
+                    texts.setdefault(m.group(1), set()).add(t)
             time.sleep(1.0)
         except Exception as e:
             print(f"  [잡코리아/{kw}] 오류: {e}")
-    for jid, title in best.items():
-        out.append({"id": f"jk_{jid}", "title": title, "company": "",
+    for jid, ts in texts.items():
+        ts = list(ts)
+        title = max(ts, key=len)
+        if len(title) <= 3:
+            continue
+        out.append({"id": f"jk_{jid}", "title": title, "company": _pick_company(ts, title),
                     "location": "대한민국", "desc": title, "source": "잡코리아",
                     "url": f"https://www.jobkorea.co.kr/Recruit/GI_Read/{jid}"})
     print(f"  [잡코리아] 수집 {len(out)}")
@@ -326,23 +340,32 @@ def crawl_jobkorea():
 #  크롤러 — 인크루트 (검색페이지 스크래핑, EUC-KR)
 # ══════════════════════════════════════════════════
 def crawl_incruit():
-    out, best = [], {}
+    out, best = [], {}   # jid -> (title, company)
+    # 회사 앵커(/company/N)와 공고 앵커(jobpost.asp?job=N)를 등장 순서대로 훑어,
+    # 각 공고 직전에 나온 회사명을 매칭
+    pat = re.compile(r'/company/\d+[^"]*"[^>]*>([\s\S]*?)</a>'
+                     r'|jobpost\.asp\?job=(\d+)[^"]*"[^>]*>([\s\S]*?)</a>')
     for kw in DOMESTIC_KEYWORDS:
         try:
             kw_euc = requests.utils.quote(kw, encoding="euc-kr")
             url = f"https://search.incruit.com/list/search.asp?col=job&kw={kw_euc}"
             r = requests.get(url, headers={"User-Agent": UA}, timeout=15)
             r.encoding = "euc-kr"
-            for m in re.finditer(r'jobpost\.asp\?job=(\d+)[^"]*"[^>]*>([\s\S]*?)</a>', r.text):
-                jid = m.group(1)
-                title = _html_text(m.group(2))
-                if title and len(title) > 3 and len(title) > len(best.get(jid, "")):
-                    best[jid] = title
+            cur_co = ""
+            for m in pat.finditer(r.text):
+                if m.group(1) is not None:                 # 회사 링크
+                    c = _html_text(m.group(1))
+                    if c and 1 < len(c) < 40:
+                        cur_co = re.sub(r'\s*(로고|관심기업.*)$', '', c).strip()
+                else:                                       # 공고 링크
+                    jid, title = m.group(2), _html_text(m.group(3))
+                    if title and len(title) > 3 and (jid not in best or len(title) > len(best[jid][0])):
+                        best[jid] = (title, cur_co)
             time.sleep(1.0)
         except Exception as e:
             print(f"  [인크루트/{kw}] 오류: {e}")
-    for jid, title in best.items():
-        out.append({"id": f"ic_{jid}", "title": title, "company": "",
+    for jid, (title, co) in best.items():
+        out.append({"id": f"ic_{jid}", "title": title, "company": co,
                     "location": "대한민국", "desc": title, "source": "인크루트",
                     "url": f"https://job.incruit.com/jobdb_info/jobpost.asp?job={jid}"})
     print(f"  [인크루트] 수집 {len(out)}")
