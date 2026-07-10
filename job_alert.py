@@ -721,6 +721,99 @@ document.querySelectorAll('#t th').forEach((th,i)=>th.addEventListener('click',(
 
 
 # ══════════════════════════════════════════════════
+#  웹 모드 — 매일 스코어링 결과를 모바일 페이지(/jobs)로 생성 (카톡 없음)
+# ══════════════════════════════════════════════════
+def _interleave(jobs):
+    """소스별로 번갈아 배치 → 평가 상한 안에서 여러 소스가 고루 포함되게."""
+    from itertools import zip_longest
+    from collections import OrderedDict
+    g = OrderedDict()
+    for j in jobs:
+        g.setdefault(j["source"], []).append(j)
+    out = []
+    for tup in zip_longest(*g.values()):
+        out += [x for x in tup if x is not None]
+    return out
+
+def _write_web(final):
+    import html as _html
+    today = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+    n = len(final)
+    if final:
+        cards = ""
+        for j, sc in final:
+            s = sc.get("score", 0)
+            color = "#16a34a" if s >= 5 else ("#ca8a04" if s == 4 else "#2563eb")
+            gap = sc.get("gap", "")
+            gap_html = (f'<div class="gap">⚠ {_html.escape(gap)}</div>'
+                        if gap and gap not in ("없음", "") else "")
+            meta = " · ".join(x for x in [j.get("company", ""), j.get("location", ""), j.get("source", "")] if x)
+            cards += (f'<a class="card" href="{_html.escape(j["url"])}" target="_blank" rel="noopener">'
+                      f'<div class="top"><span class="score" style="background:{color}">{s}</span>'
+                      f'<span class="title">{_html.escape(j["title"])}</span></div>'
+                      f'<div class="meta">{_html.escape(meta)}</div>'
+                      f'<div class="fit">💡 {_html.escape(sc.get("fit",""))}</div>{gap_html}</a>')
+        body = f'<main>{cards}</main>'
+    else:
+        body = '<main><div class="empty">오늘은 3점 이상 매칭이 없어요.<br>내일 다시 확인해보세요.</div></main>'
+    doc = f"""<!doctype html><html lang="ko"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>오늘의 채용 {n}건</title>
+<style>
+*{{box-sizing:border-box}}
+body{{margin:0;font-family:-apple-system,BlinkMacSystemFont,'Malgun Gothic',sans-serif;background:#f2f4f7;color:#111;-webkit-text-size-adjust:100%}}
+header{{background:#111;color:#fff;padding:16px;position:sticky;top:0;z-index:5}}
+header .h{{font-size:19px;font-weight:700}}
+header .sub{{color:#aaa;font-size:12px;margin-top:3px}}
+main{{padding:12px;max-width:680px;margin:0 auto}}
+.card{{display:block;background:#fff;border-radius:12px;padding:14px;margin-bottom:10px;text-decoration:none;color:inherit;box-shadow:0 1px 3px rgba(0,0,0,.08);-webkit-tap-highlight-color:transparent}}
+.card:active{{background:#f7f7f9}}
+.top{{display:flex;align-items:flex-start;gap:9px}}
+.score{{flex:none;width:28px;height:28px;border-radius:8px;color:#fff;font-weight:700;font-size:15px;display:flex;align-items:center;justify-content:center}}
+.title{{font-size:16px;font-weight:600;line-height:1.35}}
+.meta{{color:#667;font-size:13px;margin:7px 0 0 37px}}
+.fit{{color:#166534;font-size:13px;margin:5px 0 0 37px;line-height:1.35}}
+.gap{{color:#b91c1c;font-size:12px;margin:3px 0 0 37px;line-height:1.35}}
+.empty{{text-align:center;color:#888;padding:48px 20px;line-height:1.6}}
+footer{{text-align:center;color:#9aa;font-size:11px;padding:14px 16px 28px;line-height:1.6}}
+</style></head><body>
+<header><div class="h">🔔 오늘의 채용 매칭 {n}건</div>
+<div class="sub">{today} 기준 · 이력서 맥락 AI 평가(3점↑) · 점수순</div></header>
+{body}
+<footer>원티드·링크드인·사람인·잡코리아·인크루트·방산 통합<br>
+HMG·중소중견 제외 · 매일 21:00 KST 자동 업데이트</footer>
+</body></html>"""
+    path = os.path.join(_BASE_DIR, "passed_jobs.html")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(doc)
+
+def run_web():
+    print("=" * 52)
+    print(f"  WEB 모드 — {datetime.datetime.now():%Y-%m-%d %H:%M} KST (카톡 없이 /jobs 생성)")
+    print("=" * 52)
+    passed = _interleave(_collect_passed())
+    print(f"  필터 통과 {len(passed)}건", flush=True)
+    if len(passed) > SCORE_MAX:
+        print(f"  평가 {SCORE_MAX}건으로 제한", flush=True)
+        passed = passed[:SCORE_MAX]
+    final = []
+    if passed and ANTHROPIC_API_KEY:
+        try:
+            scores = score_batch(passed)
+            for j in passed:
+                sc = scores.get(j["id"])
+                if sc and sc.get("score", 0) >= ALERT_MIN:
+                    final.append((j, sc))
+            final.sort(key=lambda x: -x[1]["score"])
+        except Exception as e:
+            print(f"  평가 오류: {e}")
+    elif not ANTHROPIC_API_KEY:
+        print("  ANTHROPIC_API_KEY 미설정 — 평가 불가")
+    _write_web(final)
+    print(f"  [web] 3점↑ {len(final)}건 → passed_jobs.html  (http://<서버IP>/jobs)")
+
+
+# ══════════════════════════════════════════════════
 #  셀프테스트 (네트워크/API 미사용)
 # ══════════════════════════════════════════════════
 def _selftest():
@@ -829,6 +922,8 @@ def _selftest():
 if __name__ == "__main__":
     if "--selftest" in sys.argv:
         _selftest()
+    elif "--web" in sys.argv:
+        run_web()
     elif "--dump" in sys.argv:
         dump_passed()
     elif "--dry" in sys.argv:
