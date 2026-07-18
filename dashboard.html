@@ -87,6 +87,13 @@
   .wr:last-child{border-bottom:0;}
   .wr.rel{opacity:.5;} .wr.rel .nm{text-decoration:line-through;}
   .wr .rt{display:flex; align-items:center; gap:4px;}
+  /* 투경 항목: 해제가 부제목을 붙이기 위한 래퍼 */
+  .wi{border-bottom:0.5px solid var(--bd);}
+  .wi:last-child{border-bottom:0;}
+  .wi .wr{border-bottom:0;}
+  .wi.rel{opacity:.5;} .wi.rel .nm{text-decoration:line-through;}
+  .rp{color:var(--warn); font-size:11px; padding:0 0 6px; margin-top:-2px;}
+  .rp b{font-weight:600;}
   .ft{text-align:center; color:var(--tm); font-size:11px; padding:14px 0 22px;}
   .empty{color:var(--tm); font-size:13px; padding:14px 16px;}
   .sec.m{color:var(--up);}
@@ -327,24 +334,51 @@
   // ── 거래일수(X일차) 계산: 조회 시점(오늘) 기준 ──
   // 지정일=1일차. 파일 생성 시점과 무관하게 브라우저의 오늘 날짜로 계산해
   // 저녁 cron/당일 재실행에 따라 값이 밀리는 문제를 제거한다.
-  var KRX_HOL={'2026-01-01':1,'2026-01-29':1,'2026-01-30':1,'2026-01-31':1,'2026-02-01':1,
-    '2026-02-02':1,'2026-03-01':1,'2026-05-01':1,'2026-05-15':1,'2026-08-15':1,'2026-09-24':1,
-    '2026-09-25':1,'2026-09-26':1,'2026-09-27':1,'2026-10-03':1,'2026-10-09':1,'2026-12-25':1};
+  // 폴백용 2026년 휴장일(거래일 달력 수집 실패 시에만 사용).
+  // 이전 값은 2025년 설 연휴(1/29~2/2)가 들어 있었고 제헌절·지방선거일·연말이 빠져 있었다.
+  var KRX_HOL={'2026-01-01':1,'2026-02-16':1,'2026-02-17':1,'2026-02-18':1,
+    '2026-03-01':1,'2026-03-02':1,'2026-05-01':1,'2026-05-05':1,'2026-06-03':1,'2026-06-06':1,
+    '2026-07-17':1,'2026-08-15':1,'2026-08-17':1,'2026-09-24':1,'2026-09-25':1,'2026-09-26':1,
+    '2026-10-03':1,'2026-10-05':1,'2026-10-09':1,'2026-12-25':1,'2026-12-31':1};
   function _iso(dt){var m=dt.getMonth()+1,d=dt.getDate();return dt.getFullYear()+'-'+(m<10?'0'+m:m)+'-'+(d<10?'0'+d:d);}
   function _isBday(dt){var w=dt.getDay();return w!==0&&w!==6&&!KRX_HOL[_iso(dt)];}
   function _parseD(s){if(!s||s==='-')return null;var p=s.replace(/\//g,'-').split('-');return new Date(+p[0],+p[1]-1,+p[2]);}
   function _prevBday(dt){var d=new Date(dt);while(!_isBday(d))d.setDate(d.getDate()-1);return d;}
   function _busDays(a,b){var n=0,c=new Date(a);while(c<b){if(_isBday(c))n++;c.setDate(c.getDate()+1);}return n;}
+  // alert.json 의 실제 거래일 목록. 있으면 내장 공휴일표보다 항상 우선한다.
+  // (손으로 만든 공휴일표는 2026년 제헌절 부활 같은 변경을 놓쳐 일차가 틀어졌었다.)
+  var TD=[];
   function dayCount(des,free,haltDates){
     var d=_parseD(des); if(!d) return 0;
-    var end=_parseD(free);            // 해제 종목: 해제일에 고정. 지정 중: 오늘(직전 영업일).
-    end=end?end:_prevBday(new Date());
-    var n=_busDays(d,end)+1;
-    if(haltDates && haltDates.length){  // 매매거래정지일(오늘 이하)은 거래일수에서 제외
-      var s=_iso(d), e=_iso(end);
-      n-=haltDates.filter(function(x){return x>=s && x<=e;}).length;
+    var ds=_iso(d), es=null;
+    if(free && free!=='-'){ var f=_parseD(free); if(f) es=_iso(f); }
+
+    // ① 실제 거래일 달력 경로
+    if(TD.length && ds>=TD[0]){
+      if(!es){                        // 지정 중: 오늘 이하의 마지막 거래일
+        var t=_iso(new Date());
+        for(var i=TD.length-1;i>=0;i--){ if(TD[i]<=t){ es=TD[i]; break; } }
+      }
+      if(es){
+        var n=0;
+        for(var j=0;j<TD.length;j++){ if(TD[j]>=ds && TD[j]<=es) n++; }
+        if(haltDates && haltDates.length)   // 매매거래정지일은 거래일수에서 제외
+          n-=haltDates.filter(function(x){return x>=ds && x<=es;}).length;
+        return n<1?1:n;
+      }
     }
-    return n<1?1:n;
+
+    // ② 폴백: 내장 공휴일표
+    var end=_parseD(free);
+    // 주의: new Date() 는 '시:분'까지 들고 있어 _busDays 의 c<b 비교에서 당일이 한 번 더
+    // 세어진다(지정 당일이 2일차로 표시되던 원인). 자정으로 잘라서 날짜만 비교한다.
+    if(!end){ var _t=new Date(); _t.setHours(0,0,0,0); end=_prevBday(_t); }
+    var m=_busDays(d,end)+1;
+    if(haltDates && haltDates.length){
+      var s=_iso(d), e=_iso(end);
+      m-=haltDates.filter(function(x){return x>=s && x<=e;}).length;
+    }
+    return m<1?1:m;
   }
 
   // ── 투경 탭 렌더 ──
@@ -356,8 +390,13 @@
       var dc = dayCount(w.des, w.free, w.halt_dates);
       var days = (dc>0) ? '<span class="days">'+dc+'일차</span>' : '';
       var hb = w.halted ? '<span class="halt">정지</span>' : '';
-      return '<div class="wr'+(w.released?' rel':'')+'"><span class="nm">'+esc(w.name)+hb+
-        '<span class="code">'+esc(w.code)+'</span></span><span class="rt">'+days+st+'</span></div>';
+      // 8일차부터 해제가 표시(지정 중인 종목만). 다음 거래일 종가가 이 값 미만이면 해제 요건 충족.
+      var rp = '';
+      if(!w.released && dc>=8 && w.release_price>0){
+        rp = '<div class="rp">해제가 <b>'+Number(w.release_price).toLocaleString()+'원</b> 미만</div>';
+      }
+      return '<div class="wi'+(w.released?' rel':'')+'"><div class="wr"><span class="nm">'+esc(w.name)+hb+
+        '<span class="code">'+esc(w.code)+'</span></span><span class="rt">'+days+st+'</span></div>'+rp+'</div>';
     }).join('');
   }
   function overRows(arr){
@@ -486,7 +525,7 @@
   }
   function loadWarn(cb){
     fetch('/api/alert',{cache:'no-store'}).then(function(r){return r.json();})
-      .then(function(a){ lastAlert=a; renderWarn(a); if(cb)cb(a); })
+      .then(function(a){ lastAlert=a; TD=(a&&a.trading_days)||[]; renderWarn(a); if(cb)cb(a); })
       .catch(function(){ if(tab==='warn') document.getElementById('sub').textContent='시장경보 데이터를 불러오지 못했습니다.'; });
   }
 

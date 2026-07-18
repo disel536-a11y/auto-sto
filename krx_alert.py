@@ -24,19 +24,36 @@ BASE = os.path.dirname(os.path.abspath(__file__))
 OUT_FILE = os.path.join(BASE, "alert.json")
 HALT_FILE = os.path.join(BASE, "halt_days.json")   # 종목별 매매거래정지일 누적
 
+# 일별 종가 수집기(키움→KRX→네이버 순서로 자동 선택).
+# 없으면 해제가격만 비워두고 나머지는 정상 동작한다.
+try:
+    import price_source
+except Exception as _e:
+    price_source = None
+    print("[alert] 종가 수집기 사용 불가(해제가격 생략):", repr(_e))
+
+# 투자경고 해제가격을 계산해 표시하기 시작하는 거래일수
+RELEASE_FROM_DAY = 8
+
 OTP_URL = "https://open.krx.co.kr/contents/COM/GenerateOTP.jspx"
 DATA_URL = "https://open.krx.co.kr/contents/OPN/99/OPN99000001.jspx"
 
-# KIND(기업공시채널) — 매매거래정지 현황/예고
+# KIND(기업공시채널) - 매매거래정지 현황/예고
 KIND_HALT_URL = "https://kind.krx.co.kr/investwarn/tradinghaltissue.do"
 KIND_DISC_URL = "https://kind.krx.co.kr/disclosure/todaydisclosure.do"
 
-# 2026년 한국 공휴일(경과거래일수 계산용) — 스킬과 동일
+# 2026년 한국 공휴일(경과거래일수 계산용) - 스킬과 동일
 HOLIDAYS = {
-    "2026-01-01", "2026-01-29", "2026-01-30", "2026-01-31", "2026-02-01",
-    "2026-02-02", "2026-03-01", "2026-05-01", "2026-05-15", "2026-08-15",
-    "2026-09-24", "2026-09-25", "2026-09-26", "2026-09-27", "2026-10-03",
-    "2026-10-09", "2026-12-25",
+    "2026-01-01",
+    "2026-02-16", "2026-02-17", "2026-02-18",          # 설날(2026-02-17)
+    "2026-03-01", "2026-03-02",                        # 삼일절 + 대체
+    "2026-05-01", "2026-05-05",                        # 근로자의날, 어린이날
+    "2026-06-03", "2026-06-06",                        # 지방선거일, 현충일
+    "2026-07-17",                                      # 제헌절(2026년 공휴일 부활)
+    "2026-08-15", "2026-08-17",                        # 광복절 + 대체
+    "2026-09-24", "2026-09-25", "2026-09-26",          # 추석(2026-09-25)
+    "2026-10-03", "2026-10-05", "2026-10-09",          # 개천절 + 대체, 한글날
+    "2026-12-25", "2026-12-31",                        # 성탄절, 연말 휴장
 }
 
 
@@ -68,6 +85,41 @@ def busday_count(a: dt.date, b: dt.date) -> int:
             n += 1
         cur += dt.timedelta(days=1)
     return n
+
+
+# ── 실제 거래일 달력 ──────────────────────────────────────
+# 손으로 만든 HOLIDAYS 표는 틀리기 쉽다(2026년 제헌절 부활 같은 변경을 놓침).
+# 실제 거래일을 시세 소스에서 받아 쓰고, 실패할 때만 HOLIDAYS 로 폴백한다.
+TRADING_DAYS = []          # ['YYYY-MM-DD', ...] 오름차순
+
+
+def load_trading_days(count=90):
+    global TRADING_DAYS
+    if price_source is None:
+        return []
+    try:
+        TRADING_DAYS = price_source.fetch_trading_days(count)
+        print("[alert] 거래일 달력 %d일 (마지막 %s)" % (len(TRADING_DAYS), TRADING_DAYS[-1]))
+    except Exception as e:
+        TRADING_DAYS = []
+        print("[alert] 거래일 달력 실패 → 공휴일표로 대체:", str(e)[:150])
+    return TRADING_DAYS
+
+
+def last_trading_day() -> dt.date:
+    """오늘 이하의 가장 최근 실제 거래일."""
+    today = dt.date.today().isoformat()
+    for d in reversed(TRADING_DAYS or []):
+        if d <= today:
+            return dt.date.fromisoformat(d)
+    return prev_bday(dt.date.today())
+
+
+def td_count(a_iso: str, b_iso: str):
+    """[a, b] 양끝 포함 구간의 실제 거래일 수. 달력 밖이면 None."""
+    if not TRADING_DAYS or a_iso < TRADING_DAYS[0]:
+        return None
+    return sum(1 for d in TRADING_DAYS if a_iso <= d <= b_iso)
 
 
 def parse_kdate(s: str):
@@ -111,7 +163,7 @@ def fetch(sess: requests.Session, bld: str, page_path: str, params: dict) -> lis
 
 def collect():
     sess = _session()
-    end = prev_bday(dt.date.today())          # 기준 거래일(마지막 영업일)
+    end = last_trading_day()                  # 기준 거래일(실제 마지막 거래일)
     strt = end - dt.timedelta(days=9)         # 최근 해제분 포함용 여유 구간
     s_str, e_str = strt.strftime("%Y%m%d"), end.strftime("%Y%m%d")
 
@@ -289,11 +341,16 @@ def build(warn_raw, danger_raw, over_raw, ref_day: dt.date,
     today_next = next_bday(ref_day)
 
     def elapsed(des):
-        # (수집 마감일 기준 거래일수) — 과열 10일차 필터 등 서버 판정용.
+        # (수집 마감일 기준 거래일수) - 과열 10일차 필터 등 서버 판정용.
         # 대시보드 표시용 'X일차'는 조회 시점(오늘)이 반영되도록 dashboard.html에서
         # des/free 로 재계산한다. 여기 값은 표시에 직접 쓰이지 않음.
         d = parse_kdate(des)
-        return busday_count(d, ref_day) + 1 if d else 0
+        if not d:
+            return 0
+        n = td_count(d.isoformat(), ref_day.isoformat())   # 실제 거래일 달력 우선
+        if n is not None:
+            return max(1, n)
+        return busday_count(d, ref_day) + 1                # 폴백: 공휴일표
 
     def days_since_release(free):
         d = parse_kdate(free)
@@ -377,6 +434,8 @@ def build(warn_raw, danger_raw, over_raw, ref_day: dt.date,
     return {
         "updated": dt.datetime.now().strftime("%Y-%m-%d %H:%M"),
         "trade_date": ref_day.isoformat(),
+        # 대시보드가 'X일차'를 셀 때 쓰는 실제 거래일 목록(공휴일표 대체).
+        "trading_days": list(TRADING_DAYS),
         "warning": warn_out,
         "danger": danger_out,
         "overheat": over_out,
@@ -388,6 +447,59 @@ def build(warn_raw, danger_raw, over_raw, ref_day: dt.date,
     }
 
 
+# ── 투자경고 해제가격 ─────────────────────────────────────
+# 해제 요건: 판단일 종가가 아래 ①②③ 중 어느 것에도 해당하지 않을 것.
+#   ① 판단일 종가 ≥ 5일 전날 종가 × 1.60
+#   ② 판단일 종가 ≥ 15일 전날 종가 × 2.00
+#   ③ 판단일 종가 = 최근 15일 종가 중 최고가
+# 셋 다 피하려면 종가가 세 기준값 '모두보다 낮아야' 하므로,
+# 해제가격 = min(①,②,③ 기준값) 이고 그 값 '미만'으로 마감하면 해제 요건 충족.
+#
+# 기준 시점은 '다음 거래일(T+1)'이다. closes 의 마지막이 직전 영업일(T)이므로
+#   ① 의 5일 전날  = T-4  → closes[-5]
+#   ② 의 15일 전날 = T-14 → closes[-15]
+#   ③ 의 최근 15일 = {T-13 … T, T+1} → 이미 확정된 14일의 최고가가 기준
+def release_price(closes):
+    """closes: [(YYYYMMDD, 종가)] 날짜 오름차순. 부족하면 None."""
+    if not closes or len(closes) < 15:
+        return None
+    c = [x[1] for x in closes]
+    t1 = c[-5] * 1.60          # ① 5일 전날 대비 60% 상승선
+    t2 = c[-15] * 2.00         # ② 15일 전날 대비 100% 상승선
+    t3 = float(max(c[-14:]))   # ③ 최근 15일 최고종가선
+    return int(min(t1, t2, t3))
+
+
+def enrich_release_prices(warn_out):
+    """지정 중이고 RELEASE_FROM_DAY 이상인 투경 종목에 해제가격을 채운다.
+
+    대시보드는 조회 시점 기준으로 일차를 다시 계산하므로 서버 기준보다
+    하루 앞설 수 있다. 그래서 한 칸 여유(-1)를 두고 미리 계산해둔다.
+    """
+    if price_source is None:
+        return
+    targets = [w for w in warn_out
+               if not w["released"] and w["elapsed"] >= RELEASE_FROM_DAY - 1 and w.get("code")]
+    if not targets:
+        return
+
+    ok, used = 0, set()
+    for w in targets:
+        try:
+            closes, src = price_source.fetch_daily_closes(w["code"], count=20, want_source=True)
+            p = release_price(closes)
+            if p:
+                w["release_price"] = p
+                w["release_base"] = closes[-1][0]      # 계산에 쓴 최신 종가일
+                ok += 1
+                used.add(src)
+        except Exception as e:
+            print("[alert] 해제가격 실패 %s(%s): %s" % (w["name"], w["code"], str(e)[:200]))
+        time.sleep(0.4)                                # 호출 간격 여유(상대 서버 배려)
+    print("[alert] 해제가격 계산 %d/%d 종목%s"
+          % (ok, len(targets), (" (소스: %s)" % ",".join(sorted(used))) if used else ""))
+
+
 def save(data: dict):
     tmp = OUT_FILE + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
@@ -397,6 +509,7 @@ def save(data: dict):
 
 def main():
     try:
+        load_trading_days()          # collect() 의 기준일 계산보다 먼저
         warn_raw, danger_raw, over_raw, end = collect()
         status = fetch_halt_status()
         notice = fetch_halt_notice(end)
@@ -409,6 +522,7 @@ def main():
                 designated.add(r["isu_nm"])
         store = update_halt_store(status, notice, designated, end)
         data = build(warn_raw, danger_raw, over_raw, end, status, notice, store)
+        enrich_release_prices(data["warning"])
         save(data)
         c = data["counts"]
         print("[alert] 저장 완료 %s  투경 %d · 투위 %d · 과열 %d · 정지 %d · 정지예고 %d"
