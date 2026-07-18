@@ -517,6 +517,14 @@ def enrich_release_prices(warn_out):
                 # 판단 구간(k=0)에서 판단일 종가가 기준가 미만이면 요건 충족
                 # → 다음 거래일에 해제된다. k>0 은 아직 판단일 전이라 단정하지 않는다.
                 w["release_ready"] = bool(k == 0 and last < p)
+                # '내일 해제가' = 다음 거래일(T+1) 기준가.
+                # 이미 판단 구간(k=0)이고 오늘 요건을 못 채웠을 때만 의미가 있다.
+                #  - k>0 이면 위 해제가 자체가 이미 미래(10일차) 값이라 중복
+                #  - 이미 충족했으면 내일 해제되므로 볼 필요 없음
+                if k == 0 and not w["release_ready"]:
+                    pn = release_price(closes, 1)
+                    if pn:
+                        w["release_price_next"] = pn
                 ok += 1
                 used.add(src)
         except Exception as e:

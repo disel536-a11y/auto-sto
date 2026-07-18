@@ -92,8 +92,10 @@
   .wi:last-child{border-bottom:0;}
   .wi .wr{border-bottom:0;}
   .wi.rel{opacity:.5;} .wi.rel .nm{text-decoration:line-through;}
-  .rp{color:var(--warn); font-size:11px; padding:0 0 6px; margin-top:-2px;}
+  .rp{color:var(--warn); font-size:11px; padding:0 0 1px; margin-top:-2px;}
   .rp b{font-weight:600;}
+  .rp2{color:var(--ts); font-size:11px; padding:0 0 6px;}
+  .rp2 b{font-weight:600; color:var(--warn);}
   .rpn{color:var(--tm); font-size:10px;}
   /* 판단일 종가가 해제가 미만 = 요건 충족 → 다음 거래일 해제 */
   .st-rdy{background:var(--sucbg); color:var(--suc); font-size:10px; font-weight:600;
@@ -408,6 +410,11 @@
             + (w.release_ready ? ' <span class="rpok">충족</span>' : '')
           : '';
         rp = '<div class="rp">해제가 <b>'+Number(w.release_price).toLocaleString()+'원</b> 미만'+note+cmp+'</div>';
+        // 오늘 미충족이면 다음 거래일 기준가도 함께
+        if(w.release_price_next>0){
+          rp += '<div class="rp2">내일 해제가 <b>'
+              + Number(w.release_price_next).toLocaleString()+'원</b> 미만</div>';
+        }
       }
       return '<div class="wi'+(w.released?' rel':'')+'"><div class="wr"><span class="nm">'+esc(w.name)+hb+
         '<span class="code">'+esc(w.code)+'</span></span><span class="rt">'+days+st+'</span></div>'+rp+'</div>';
