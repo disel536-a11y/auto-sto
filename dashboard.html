@@ -94,6 +94,7 @@
   .wi.rel{opacity:.5;} .wi.rel .nm{text-decoration:line-through;}
   .rp{color:var(--warn); font-size:11px; padding:0 0 6px; margin-top:-2px;}
   .rp b{font-weight:600;}
+  .rpn{color:var(--tm); font-size:10px;}
   .ft{text-align:center; color:var(--tm); font-size:11px; padding:14px 0 22px;}
   .empty{color:var(--tm); font-size:13px; padding:14px 16px;}
   .sec.m{color:var(--up);}
@@ -393,7 +394,9 @@
       // 8일차부터 해제가 표시(지정 중인 종목만). 다음 거래일 종가가 이 값 미만이면 해제 요건 충족.
       var rp = '';
       if(!w.released && dc>=8 && w.release_price>0){
-        rp = '<div class="rp">해제가 <b>'+Number(w.release_price).toLocaleString()+'원</b> 미만</div>';
+        // release_pending>0 이면 아직 10일차 전이라 '그날 적용될 예상치'다.
+        var note = (w.release_pending>0) ? ' <span class="rpn">(10일차 예상)</span>' : '';
+        rp = '<div class="rp">해제가 <b>'+Number(w.release_price).toLocaleString()+'원</b> 미만'+note+'</div>';
       }
       return '<div class="wi'+(w.released?' rel':'')+'"><div class="wr"><span class="nm">'+esc(w.name)+hb+
         '<span class="code">'+esc(w.code)+'</span></span><span class="rt">'+days+st+'</span></div>'+rp+'</div>';

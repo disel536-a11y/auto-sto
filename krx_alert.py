@@ -34,6 +34,8 @@ except Exception as _e:
 
 # 투자경고 해제가격을 계산해 표시하기 시작하는 거래일수
 RELEASE_FROM_DAY = 8
+# 해제 판단이 시작되는 거래일수(지정일=1일차 기준). 이 날부터 매일 요건을 본다.
+JUDGE_DAY = 10
 
 OTP_URL = "https://open.krx.co.kr/contents/COM/GenerateOTP.jspx"
 DATA_URL = "https://open.krx.co.kr/contents/OPN/99/OPN99000001.jspx"
@@ -459,14 +461,30 @@ def build(warn_raw, danger_raw, over_raw, ref_day: dt.date,
 #   ① 의 5일 전날  = T-4  → closes[-5]
 #   ② 의 15일 전날 = T-14 → closes[-15]
 #   ③ 의 최근 15일 = {T-13 … T, T+1} → 이미 확정된 14일의 최고가가 기준
-def release_price(closes):
-    """closes: [(YYYYMMDD, 종가)] 날짜 오름차순. 부족하면 None."""
-    if not closes or len(closes) < 15:
+def release_price(closes, k=0):
+    """판단일(D)의 해제 기준가. closes 는 [(YYYYMMDD, 종가)] 오름차순.
+
+    k = 최신 종가일(T)에서 판단일까지 남은 거래일 수.  D = T + k
+      - 아직 10일차 전이면 k = 10 - 현재일차  (10일차에 적용될 값을 미리 계산)
+      - 이미 10일차 이상이면 k = 0           (최신 종가일이 곧 판단일)
+
+    조건의 기준일을 D 기준으로 풀면:
+      ① D-5  = T-(5-k)   → c[-(6-k)]
+      ② D-15 = T-(15-k)  → c[-(16-k)]
+      ③ 최근 15일 {D-14..D} 중 확정분 = T-(14-k)..T = (15-k)일 → c[-(15-k):]
+
+    k>0 이면 ③의 윈도우가 아직 다 안 찼다. 남은 날 종가가 채워지며 최고가는
+    오르기만 하므로, 이 값은 실제 해제가의 하한이다(값이 낮아지지는 않는다).
+    """
+    if k < 0 or k > 4:                 # k가 5 이상이면 ①의 기준일이 미래라 계산 불가
+        return None
+    need = 16 - k
+    if not closes or len(closes) < need:
         return None
     c = [x[1] for x in closes]
-    t1 = c[-5] * 1.60          # ① 5일 전날 대비 60% 상승선
-    t2 = c[-15] * 2.00         # ② 15일 전날 대비 100% 상승선
-    t3 = float(max(c[-14:]))   # ③ 최근 15일 최고종가선
+    t1 = c[-(6 - k)] * 1.60            # ① 5일 전날 대비 60% 상승선
+    t2 = c[-(16 - k)] * 2.00           # ② 15일 전날 대비 100% 상승선
+    t3 = float(max(c[-(15 - k):]))     # ③ 최근 15일 최고종가선(확정분)
     return int(min(t1, t2, t3))
 
 
@@ -486,11 +504,14 @@ def enrich_release_prices(warn_out):
     ok, used = 0, set()
     for w in targets:
         try:
-            closes, src = price_source.fetch_daily_closes(w["code"], count=20, want_source=True)
-            p = release_price(closes)
+            closes, src = price_source.fetch_daily_closes(w["code"], count=25, want_source=True)
+            # 해제 판단은 JUDGE_DAY(10일차)부터. 아직 못 미쳤으면 그날까지 남은 거래일수.
+            k = max(0, JUDGE_DAY - w["elapsed"])
+            p = release_price(closes, k)
             if p:
                 w["release_price"] = p
                 w["release_base"] = closes[-1][0]      # 계산에 쓴 최신 종가일
+                w["release_pending"] = k               # 0이면 확정 판단 구간, >0이면 예상치
                 ok += 1
                 used.add(src)
         except Exception as e:
