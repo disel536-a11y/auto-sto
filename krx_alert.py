@@ -208,6 +208,34 @@ class _RowParser(HTMLParser):
             self._buf.append(data)
 
 
+def is_halt_title(title: str) -> bool:
+    """공시 제목이 '매매거래정지'를 뜻하는지 판정.
+
+    KRX 제목 표기가 일정하지 않아 두 가지를 처리한다.
+      - 띄어쓰기: '매매거래 정지 및 재개(투자경고종목 지정중)'  ← 모나미 사례.
+        붙여쓰기만 찾으면 놓친다.
+      - 해제 공시 제외: '주권매매거래정지해제(감자 주권 변경상장)' 는 정지가 아니라
+        재개다. '정지해제/거래재개' 토큰을 먼저 지운 뒤에도 '매매거래정지'가
+        남아 있어야 진짜 정지 공시로 본다.
+        예) '매매거래정지및정지해제' -> '매매거래정지및' (정지 O)
+            '주권매매거래정지해제'   -> '주권매매거래'   (정지 X)
+    """
+    n = (title or "").replace(" ", "")
+    if "예고" in n:                      # 예고 공시는 별도 분류(is_halt_notice_title)
+        return False
+    core = n.replace("정지해제", "").replace("거래재개", "")
+    return "매매거래정지" in core
+
+
+def is_halt_notice_title(title: str) -> bool:
+    """'매매거래정지 예고' 공시인지. (사전 안내이지 정지 자체는 아님)
+
+    '투자경고종목 지정예고' 같은 다른 예고 공시는 제외한다.
+    """
+    n = (title or "").replace(" ", "")
+    return "매매거래정지" in n and "예고" in n
+
+
 def _kind_session() -> requests.Session:
     s = requests.Session()
     s.headers.update({
@@ -223,9 +251,12 @@ def fetch_halt_status():
     try:
         s = _kind_session()
         s.get(KIND_HALT_URL + "?method=searchTradingHaltIssueMain", timeout=20)
+        # marketType 을 빈 문자열로 보내면 KIND 가 '빈 응답(0바이트)'을 준다.
+        # 반드시 "0"(전체) 같은 실제 값을 넣어야 표가 온다. 이걸 놓쳐서
+        # '거래정지 종목'이 항상 0건이었고 halt_days.json 도 계속 비어 있었다.
         body = {"method": "searchTradingHaltIssueSub", "forward": "tradinghaltissue_sub",
                 "currentPageSize": "300", "pageIndex": "1", "searchMode": "",
-                "searchCodeType": "", "searchCorpName": "", "marketType": ""}
+                "searchCodeType": "", "searchCorpName": "", "marketType": "0"}
         html = s.post(KIND_HALT_URL, data=body,
                       headers={"Referer": KIND_HALT_URL}, timeout=20).text
         p = _RowParser(); p.feed(html)
@@ -243,29 +274,37 @@ def fetch_halt_status():
         return []
 
 
-def fetch_halt_notice(ref_day: dt.date):
-    """KIND 오늘 공시 중 제목에 '매매거래정지' 포함 → [{'time','name','title'}]. 실패 시 []."""
+def fetch_halt_disclosures(ref_day: dt.date):
+    """기준일 공시를 두 갈래로 나눠 반환 → (정지공시, 정지예고공시).
+
+    - 정지공시  : 실제 매매거래정지가 발생/예정인 공시(다음 거래일부터 정지).
+                  예) '매매거래 정지 및 재개(투자경고종목 지정중)'  ← 모나미
+    - 예고공시  : '매매거래정지 예고' 처럼 사전 안내에 그치는 공시.
+    실패 시 ([], []).
+    """
     try:
         s = _kind_session()
         s.get(KIND_DISC_URL + "?method=searchTodayDisclosureMain", timeout=20)
         body = {"method": "searchTodayDisclosureSub", "forward": "todaydisclosure_sub",
-                "currentPageSize": "200", "pageIndex": "1", "orderMode": "0", "orderStat": "D",
+                "currentPageSize": "300", "pageIndex": "1", "orderMode": "0", "orderStat": "D",
                 "marketType": "", "searchMode": "", "searchCodeType": "", "chose": "",
                 "todayFlag": "N", "selDate": ref_day.isoformat(), "searchCorpName": ""}
         html = s.post(KIND_DISC_URL, data=body,
                       headers={"Referer": KIND_DISC_URL}, timeout=20).text
         p = _RowParser(); p.feed(html)
-        out = []
+        halts, notices = [], []
         for r in p.rows:                       # r = [시각, 종목명, 제목, 시장본부, …]
             if len(r) < 3:
                 continue
-            title = r[2].strip()
-            if "매매거래정지" in title:
-                out.append({"time": r[0].strip(), "name": r[1].strip(), "title": title})
-        return out
+            item = {"time": r[0].strip(), "name": r[1].strip(), "title": r[2].strip()}
+            if is_halt_notice_title(item["title"]):
+                notices.append(item)
+            elif is_halt_title(item["title"]):
+                halts.append(item)
+        return halts, notices
     except Exception as e:
-        print("[alert] 정지예고 수집 실패:", repr(e))
-        return []
+        print("[alert] 정지 공시 수집 실패:", repr(e))
+        return [], []
 
 
 # ── 정지일 누적 저장(종목별 날짜 집합, 멱등) ────────────────
@@ -287,11 +326,12 @@ def _save_halt_store(store):
     os.replace(tmp, HALT_FILE)
 
 
-def update_halt_store(status, notice, designated, ref_day):
+def update_halt_store(status, halt_disc, designated, ref_day):
     """정지 관측을 종목별 날짜 집합으로 누적.
     - 현황(오늘 정지 중): ref_day 기록
-    - 예고(매매거래정지 예고 공시): 다음 영업일 기록(그날 정지 예정)
-    지정 종목만 대상, 하루 1회 멱등, 지정 해제 종목은 정리."""
+    - 정지 공시(장 마감 후 게시): 다음 영업일 기록(그날 정지 예정)
+    지정 종목만 대상, 하루 1회 멱등, 지정 해제 종목은 정리.
+    ※ '예고' 공시는 정지 확정이 아니므로 여기서 쓰지 않는다."""
     store = _load_halt_store()
     seen = store["seen"]
     halted_today = {h["name"] for h in status}
@@ -308,7 +348,7 @@ def update_halt_store(status, notice, designated, ref_day):
     for nm in designated:
         if nm in halted_today:
             mark(nm, today)
-    for nd in notice:
+    for nd in (halt_disc or []):
         mark(nd["name"], nxt)
 
     for nm in list(seen.keys()):
@@ -320,11 +360,13 @@ def update_halt_store(status, notice, designated, ref_day):
 
 # ── 스킬 규칙 적용 → dashboard용 구조 ──────────────────────
 def build(warn_raw, danger_raw, over_raw, ref_day: dt.date,
-          status=None, notice=None, store=None):
+          status=None, notice=None, store=None, halt_disc=None):
     status = status or []
     notice = notice or []
+    halt_disc = halt_disc or []
     seen = (store or {}).get("seen", {})
-    halted_now = {h["name"] for h in status}
+    # 현재 정지 중 + 정지 공시로 다음 거래일 정지 예정인 종목 → 종목행 '정지' 배지
+    halted_now = {h["name"] for h in status} | {d["name"] for d in halt_disc}
 
     code_by_name = {}
     for r in list(warn_raw) + list(danger_raw):
@@ -374,9 +416,7 @@ def build(warn_raw, danger_raw, over_raw, ref_day: dt.date,
     def include_warn(w):
         if w["name"] in danger_active_names:      # 투위 지정 중이면 투경에서 제외
             return False
-        if w["free"] == "-":
-            return True
-        return days_since_release(w["free"]) <= 2  # 해제 후 2거래일 이내만
+        return w["free"] == "-"                   # 해제 종목은 표시하지 않음(사용자 요청)
 
     def pack(rows):
         out = []
@@ -398,7 +438,7 @@ def build(warn_raw, danger_raw, over_raw, ref_day: dt.date,
     # 투자위험: 중복 종목 최신 1건만(현재 지정 중 우선)
     dedup_seen, danger_dedup = set(), []
     for d in danger:
-        if d["name"] in dedup_seen:
+        if d["name"] in dedup_seen or d["free"] != "-":   # 해제 종목 제외
             continue
         dedup_seen.add(d["name"])
         danger_dedup.append(d)
@@ -423,13 +463,31 @@ def build(warn_raw, danger_raw, over_raw, ref_day: dt.date,
         })
 
     # 거래정지 현황(투경 관련만): 지정 종목이거나 사유에 투경 키워드
-    halted_out = [{"name": h["name"], "code": code_by_name.get(h["name"], ""),
-                   "reason": h["reason"]}
-                  for h in status
-                  if h["name"] in code_by_name
-                  or any(k in h["reason"] for k in ("투자경고", "투자위험", "단기과열"))]
+    # 거래정지 종목 = ① 현재 정지 중(KIND 현황) + ② 정지 공시로 다음 거래일 정지 예정.
+    # 공시는 장 마감 후 나오므로 실제 정지는 다음 거래일이다. 사용자가 그걸 보고
+    # 매매하는 시점도 다음 거래일이라 같은 목록에 넣는다(상태는 구분 표기).
+    def is_warn_related(name, text):
+        return name in code_by_name or any(
+            k in (text or "") for k in ("투자경고", "투자위험", "단기과열"))
 
-    # 매매거래정지 예고 공시
+    halted_out, seen_halt = [], set()
+    for h in status:
+        if not is_warn_related(h["name"], h["reason"]):
+            continue
+        halted_out.append({"name": h["name"], "code": code_by_name.get(h["name"], ""),
+                           "reason": h["reason"], "when": "정지 중", "pending": False})
+        seen_halt.add(h["name"])
+
+    nxt = next_bday(ref_day)
+    for d in (halt_disc or []):
+        if d["name"] in seen_halt or not is_warn_related(d["name"], d["title"]):
+            continue
+        halted_out.append({"name": d["name"], "code": code_by_name.get(d["name"], ""),
+                           "reason": d["title"],
+                           "when": "%d/%d 정지 예정" % (nxt.month, nxt.day), "pending": True})
+        seen_halt.add(d["name"])
+
+    # 매매거래정지 '예고' 공시만
     notice_out = [{"name": n["name"], "code": code_by_name.get(n["name"], ""),
                    "title": n["title"], "time": n["time"]} for n in notice]
 
@@ -546,7 +604,7 @@ def main():
         load_trading_days()          # collect() 의 기준일 계산보다 먼저
         warn_raw, danger_raw, over_raw, end = collect()
         status = fetch_halt_status()
-        notice = fetch_halt_notice(end)
+        halt_disc, notice = fetch_halt_disclosures(end)
         designated = set()
         for r in warn_raw + danger_raw:
             if r.get("kor_isu_nm"):
@@ -554,8 +612,8 @@ def main():
         for r in over_raw:
             if r.get("isu_nm"):
                 designated.add(r["isu_nm"])
-        store = update_halt_store(status, notice, designated, end)
-        data = build(warn_raw, danger_raw, over_raw, end, status, notice, store)
+        store = update_halt_store(status, halt_disc, designated, end)
+        data = build(warn_raw, danger_raw, over_raw, end, status, notice, store, halt_disc)
         enrich_release_prices(data["warning"])
         save(data)
         c = data["counts"]

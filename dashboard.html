@@ -101,6 +101,8 @@
   .st-rdy{background:var(--sucbg); color:var(--suc); font-size:10px; font-weight:600;
     padding:1px 5px; border-radius:4px;}
   .rpok{color:var(--suc); font-weight:600;}
+  .st-halt{color:var(--up); font-size:11px; font-weight:600; margin-left:6px; white-space:nowrap;}
+  .st-pend{color:var(--warn); font-size:11px; font-weight:600; margin-left:6px; white-space:nowrap;}
   .ft{text-align:center; color:var(--tm); font-size:11px; padding:14px 0 22px;}
   .empty{color:var(--tm); font-size:13px; padding:14px 16px;}
   .sec.m{color:var(--up);}
@@ -438,8 +440,11 @@
     if(!arr.length) return '<div class="empty">현재 거래정지 종목이 없습니다.</div>';
     return arr.map(function(h){
       var code = h.code ? '<span class="code">'+esc(h.code)+'</span>' : '';
+      // when: '정지 중' 또는 'M/D 정지 예정'(공시는 장 마감 후 나와 다음 거래일 정지)
+      var when = h.when
+        ? '<span class="'+(h.pending?'st-pend':'st-halt')+'">'+esc(h.when)+'</span>' : '';
       return '<div class="wr"><span class="nm">'+esc(h.name)+code+
-        '</span><span class="rt"><span class="reason">'+esc(h.reason||'')+'</span></span></div>';
+        '</span><span class="rt"><span class="reason">'+esc(h.reason||'')+'</span>'+when+'</span></div>';
     }).join('');
   }
   function noticeRows(arr){
