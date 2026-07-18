@@ -509,9 +509,14 @@ def enrich_release_prices(warn_out):
             k = max(0, JUDGE_DAY - w["elapsed"])
             p = release_price(closes, k)
             if p:
+                last = closes[-1][1]
                 w["release_price"] = p
                 w["release_base"] = closes[-1][0]      # 계산에 쓴 최신 종가일
                 w["release_pending"] = k               # 0이면 확정 판단 구간, >0이면 예상치
+                w["last_close"] = last
+                # 판단 구간(k=0)에서 판단일 종가가 기준가 미만이면 요건 충족
+                # → 다음 거래일에 해제된다. k>0 은 아직 판단일 전이라 단정하지 않는다.
+                w["release_ready"] = bool(k == 0 and last < p)
                 ok += 1
                 used.add(src)
         except Exception as e:

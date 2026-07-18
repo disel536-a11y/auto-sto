@@ -95,6 +95,10 @@
   .rp{color:var(--warn); font-size:11px; padding:0 0 6px; margin-top:-2px;}
   .rp b{font-weight:600;}
   .rpn{color:var(--tm); font-size:10px;}
+  /* 판단일 종가가 해제가 미만 = 요건 충족 → 다음 거래일 해제 */
+  .st-rdy{background:var(--sucbg); color:var(--suc); font-size:10px; font-weight:600;
+    padding:1px 5px; border-radius:4px;}
+  .rpok{color:var(--suc); font-weight:600;}
   .ft{text-align:center; color:var(--tm); font-size:11px; padding:14px 0 22px;}
   .empty{color:var(--tm); font-size:13px; padding:14px 16px;}
   .sec.m{color:var(--up);}
@@ -386,8 +390,10 @@
   function warnRows(arr){
     if(!arr.length) return '<div class="empty">해당 종목이 없습니다.</div>';
     return arr.map(function(w){
+      // 판단 구간에서 요건을 이미 충족했으면 '해제 예정'으로 구분해 보여준다.
       var st = w.released ? '<span class="st-off">'+esc(w.state)+'</span>'
-                          : '<span class="st-on">지정 중</span>';
+             : w.release_ready ? '<span class="st-rdy">해제 예정</span>'
+                               : '<span class="st-on">지정 중</span>';
       var dc = dayCount(w.des, w.free, w.halt_dates);
       var days = (dc>0) ? '<span class="days">'+dc+'일차</span>' : '';
       var hb = w.halted ? '<span class="halt">정지</span>' : '';
@@ -396,7 +402,12 @@
       if(!w.released && dc>=8 && w.release_price>0){
         // release_pending>0 이면 아직 10일차 전이라 '그날 적용될 예상치'다.
         var note = (w.release_pending>0) ? ' <span class="rpn">(10일차 예상)</span>' : '';
-        rp = '<div class="rp">해제가 <b>'+Number(w.release_price).toLocaleString()+'원</b> 미만'+note+'</div>';
+        // 판단 근거가 보이도록 종가를 함께 표시
+        var cmp = (w.last_close>0)
+          ? ' <span class="rpn">· 종가 '+Number(w.last_close).toLocaleString()+'원</span>'
+            + (w.release_ready ? ' <span class="rpok">충족</span>' : '')
+          : '';
+        rp = '<div class="rp">해제가 <b>'+Number(w.release_price).toLocaleString()+'원</b> 미만'+note+cmp+'</div>';
       }
       return '<div class="wi'+(w.released?' rel':'')+'"><div class="wr"><span class="nm">'+esc(w.name)+hb+
         '<span class="code">'+esc(w.code)+'</span></span><span class="rt">'+days+st+'</span></div>'+rp+'</div>';
