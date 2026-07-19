@@ -1063,16 +1063,9 @@ def compute_match(groups: list) -> list:
 
         # ── ① 테마 경로: 동조주 2종목↑ + 대금 형성(1000억↑) ──
         if not _match_skip_theme(theme) and len(eff) >= 2:
-            uppers = [m for m in eff if (m.get("등락률", 0) or 0) >= UPPER_LIMIT_THRESHOLD]
-            if len(uppers) >= 2:
-                # 진입 시각이 이른 순 → 동일/미기록이면 상승률 높은 순으로 tie-break
-                leader = min(
-                    uppers,
-                    key=lambda m: (upper_ts.get(m.get("코드", ""), "99:99:99"),
-                                   -(m.get("등락률", 0) or 0)),
-                )
-            else:
-                leader = max(eff, key=lambda m: m.get("등락률", 0))    # 대장 = 상승률 1위
+            # 대표 = 테마의 '첫번째 종목'과 동일 기준(_member_sort_key):
+            # 상한가가 있으면 가장 먼저 상한가 간 종목, 없으면 상승률 1위.
+            leader = min(eff, key=lambda m: _member_sort_key(m, upper_ts))
             former = max(eff, key=lambda m: m.get("거래대금", 0) or 0)  # 대금 형성 종목
             amt_won = former.get("거래대금", 0) or 0
             co = [m for m in eff if m is not leader and m.get("등락률", 0) > 0]
@@ -1106,9 +1099,10 @@ def compute_match(groups: list) -> list:
                     "amt_value": round(amt / 1e8),
                 })
 
-    # 코드 중복 제거(방어) 후 상승률순 상위 MATCH_MAX개
+    # 코드 중복 제거(방어) 후 '테마 순위순'(groups 정렬 = 총 거래대금순, catch-all 뒤)
+    # 상위 MATCH_MAX개 — 최상단 카드 = 가장 상위 테마의 첫번째 종목 (사용자 결정)
     seen, uniq = set(), []
-    for c in sorted(cands, key=lambda c: c["rate"], reverse=True):
+    for c in cands:
         if c["code"] in seen:
             continue
         seen.add(c["code"])
