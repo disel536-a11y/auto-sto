@@ -18,6 +18,7 @@ from flask import (Flask, send_file, Response, jsonify, request,
                    session, redirect, url_for, render_template_string)
 
 import auth
+import board
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 DATA_FILE = os.path.join(BASE, "data.json")
@@ -59,6 +60,7 @@ app.config.update(
     PERMANENT_SESSION_LIFETIME=60 * 60 * 24 * 14,  # 14일
 )
 auth.init_db()
+board.init_db()
 
 
 # ── 헬퍼 ────────────────────────────────────────────────
@@ -95,9 +97,23 @@ def admin_required(f):
         u = current_user()
         if not u:
             return redirect(url_for("login", next=request.path))
-        if u["role"] != "admin":
+        if not auth.is_admin(u):                      # admin 또는 owner
+            if request.path.startswith("/api/"):
+                return jsonify(status="forbidden"), 403
             return Response("권한이 없습니다 (관리자 전용).", status=403,
                             mimetype="text/plain; charset=utf-8")
+        return f(*a, **k)
+    return wrap
+
+
+def owner_required(f):
+    @wraps(f)
+    def wrap(*a, **k):
+        u = current_user()
+        if not u:
+            return redirect(url_for("login", next=request.path))
+        if not auth.is_owner(u):
+            return jsonify(status="forbidden", detail="공지 작성 권한이 없습니다."), 403
         return f(*a, **k)
     return wrap
 
@@ -186,7 +202,71 @@ def api_alert():
 @login_required
 def api_me():
     u = current_user()
-    return jsonify(username=u["username"], role=u["role"])
+    return jsonify(username=u["username"], role=u["role"],
+                   is_admin=auth.is_admin(u), is_owner=auth.is_owner(u))
+
+
+# ── 공지 & 문의 게시판 ──────────────────────────────────
+@app.route("/api/board")
+@login_required
+def api_board():
+    """공지 + 문의(댓글 포함) 전체. 문의는 전체 공개."""
+    return jsonify(notices=board.list_notices(), posts=board.list_posts())
+
+
+@app.route("/api/board/notice", methods=["POST"])
+@owner_required
+def api_notice_create():
+    u = current_user()
+    nid, err = board.create_notice(request.form.get("title"),
+                                   request.form.get("body"), u["username"])
+    return (jsonify(status="error", detail=err), 400) if err else jsonify(status="ok", id=nid)
+
+
+@app.route("/api/board/notice/<int:nid>", methods=["POST"])
+@owner_required
+def api_notice_edit(nid):
+    action = request.form.get("action", "edit")
+    if action == "delete":
+        return jsonify(status="ok" if board.delete_notice(nid) else "error")
+    err = board.update_notice(nid, request.form.get("title"), request.form.get("body"))
+    return (jsonify(status="error", detail=err), 400) if err else jsonify(status="ok")
+
+
+@app.route("/api/board/post", methods=["POST"])
+@login_required
+def api_post_create():
+    u = current_user()
+    pid, err = board.create_post(u, request.form.get("title"), request.form.get("body"))
+    return (jsonify(status="error", detail=err), 400) if err else jsonify(status="ok", id=pid)
+
+
+@app.route("/api/board/post/<int:pid>/delete", methods=["POST"])
+@login_required
+def api_post_delete(pid):
+    u = current_user()
+    p = board.get_post(pid)
+    if not p:
+        return jsonify(status="error", detail="없는 글입니다."), 404
+    # 작성 본인 또는 관리자만 삭제
+    if p["user_id"] != u["id"] and not auth.is_admin(u):
+        return jsonify(status="forbidden", detail="삭제 권한이 없습니다."), 403
+    return jsonify(status="ok" if board.delete_post(pid) else "error")
+
+
+@app.route("/api/board/post/<int:pid>/comment", methods=["POST"])
+@admin_required
+def api_comment_create(pid):
+    """문의 댓글 = admin/owner 전용."""
+    u = current_user()
+    cid, err = board.add_comment(pid, u, request.form.get("body"))
+    return (jsonify(status="error", detail=err), 400) if err else jsonify(status="ok", id=cid)
+
+
+@app.route("/api/board/comment/<int:cid>/delete", methods=["POST"])
+@admin_required
+def api_comment_delete(cid):
+    return jsonify(status="ok" if board.delete_comment(cid) else "error")
 
 
 def _bot_alive() -> bool:
@@ -241,6 +321,10 @@ def admin_overview():
 def admin_user(uid):
     me = current_user()
     action = request.form.get("action", "")
+    # owner 계정은 웹에서 변경·삭제 불가(잠금 방지). owner 관리는 CLI 로만.
+    target = auth.get_user_by_id(uid)
+    if target and target.get("role") == "owner" and uid != me["id"]:
+        return jsonify(status="error", detail="owner 계정은 여기서 변경할 수 없습니다."), 400
     ok = False
     if action == "approve":
         ok = auth.set_status(uid, "active")
@@ -300,10 +384,10 @@ LOGIN_HTML = r"""<!DOCTYPE html>
       stroke-linecap="round" stroke-linejoin="round"><polyline points="3 16 9 10 13 14 21 6"/>
       <polyline points="21 11 21 6 16 6"/></svg>마켓중심</h1>
   {% if mode=='register' and done %}
-    <div class="ok">가입 신청이 접수되었습니다.<br>관리자 승인 후 로그인할 수 있습니다.</div>
-    <div class="alt"><a href="{{ url_for('login') }}">로그인으로</a></div>
+    <div class="ok">가입이 완료되었습니다.<br>이제 로그인하여 바로 이용할 수 있습니다.</div>
+    <div class="alt"><a href="{{ url_for('login') }}">로그인하러 가기</a></div>
   {% else %}
-    <p class="sub">{{ '새 계정을 신청합니다.' if mode=='register' else '계정으로 로그인하세요.' }}</p>
+    <p class="sub">{{ '새 계정을 만듭니다.' if mode=='register' else '계정으로 로그인하세요.' }}</p>
     {% if error %}<div class="err">{{ error }}</div>{% endif %}
     <form method="post">
       <label>아이디</label>
@@ -315,7 +399,7 @@ LOGIN_HTML = r"""<!DOCTYPE html>
         <label>비밀번호 확인</label>
         <input name="password2" type="password" autocomplete="new-password" required>
       {% endif %}
-      <button type="submit">{{ '가입 신청' if mode=='register' else '로그인' }}</button>
+      <button type="submit">{{ '가입하기' if mode=='register' else '로그인' }}</button>
     </form>
     {% if mode=='register' %}
       <div class="alt">이미 계정이 있으신가요? <a href="{{ url_for('login') }}">로그인</a></div>
@@ -350,6 +434,7 @@ ADMIN_HTML = r"""<!DOCTYPE html>
   th{color:var(--tm);font-weight:600;}
   .tblwrap{background:var(--scr);border:0.5px solid var(--bd);border-radius:12px;overflow-x:auto;}
   .badge{font-size:10.5px;font-weight:600;padding:1px 7px;border-radius:20px;}
+  .b-owner{color:var(--up);border:0.5px solid var(--up);}
   .b-admin{color:var(--warn);border:0.5px solid var(--warn);}
   .b-user{color:var(--tm);border:0.5px solid var(--tm);}
   .b-active{color:var(--suc);border:0.5px solid var(--suc);}
@@ -403,16 +488,20 @@ async function load(){
   ].map(t=>`<div class="tile"><div class="n">${esc(t[1])}</div><div class="l">${t[0]}</div></div>`).join('');
 
   document.querySelector('#users tbody').innerHTML=d.users.map(u=>{
-    const rb=u.role==='admin'?'<span class="badge b-admin">admin</span>':'<span class="badge b-user">user</span>';
+    const rb=`<span class="badge b-${u.role}">${u.role}</span>`;
     const sb=`<span class="badge b-${u.status}">${u.status}</span>`;
     let a=[];
-    if(u.status==='pending')a.push(`<button class="p" onclick="act(${u.id},'approve')">승인</button>`);
-    if(u.status==='active')a.push(`<button onclick="act(${u.id},'disable')">비활성</button>`);
-    if(u.status==='disabled')a.push(`<button class="p" onclick="act(${u.id},'approve')">복구</button>`);
-    a.push(u.role==='admin'
-      ?`<button onclick="act(${u.id},'make-user')">관리자해제</button>`
-      :`<button onclick="act(${u.id},'make-admin')">관리자지정</button>`);
-    a.push(`<button class="d" onclick="del(${u.id},'${esc(u.username)}')">삭제</button>`);
+    if(u.role==='owner'){                 // owner 는 웹에서 변경 불가(CLI 전용)
+      a.push('<span class="muted">—</span>');
+    }else{
+      if(u.status==='pending')a.push(`<button class="p" onclick="act(${u.id},'approve')">승인</button>`);
+      if(u.status==='active')a.push(`<button onclick="act(${u.id},'disable')">비활성</button>`);
+      if(u.status==='disabled')a.push(`<button class="p" onclick="act(${u.id},'approve')">복구</button>`);
+      a.push(u.role==='admin'
+        ?`<button onclick="act(${u.id},'make-user')">관리자해제</button>`
+        :`<button onclick="act(${u.id},'make-admin')">관리자지정</button>`);
+      a.push(`<button class="d" onclick="del(${u.id},'${esc(u.username)}')">삭제</button>`);
+    }
     return `<tr><td>${u.id}</td><td>${esc(u.username)}</td><td>${rb}</td><td>${sb}</td>
       <td class="muted">${esc((u.created_at||'').slice(0,10))}</td>
       <td class="muted">${esc(u.last_login||'-')}</td>
@@ -445,4 +534,12 @@ load();
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=80)
+    # HTTPS 도입 후에는 nginx(80/443) → Flask(8000) 구조.
+    # 필요하면 config.py 의 PORT 로 덮어쓸 수 있다(예전처럼 80 직접 쓰려면 PORT=80).
+    port = 8000
+    try:
+        import config
+        port = int(getattr(config, "PORT", port))
+    except Exception:
+        pass
+    app.run(host="0.0.0.0", port=port)

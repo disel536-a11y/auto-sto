@@ -158,6 +158,37 @@
   a.nchip{color:var(--tp);}
   .tnews{display:inline-block; margin-top:9px; font-size:11.5px; color:var(--dn); text-decoration:none; font-weight:600;}
   .tnews:active{opacity:.6;}
+  /* ── 공지·문의 게시판 ── */
+  .addbtn{float:right; font-size:11.5px; font-weight:600; color:var(--dn); background:none;
+    border:0; cursor:pointer; font-family:inherit; padding:0;}
+  .bform{margin:0 16px 10px; background:var(--scr); border:0.5px solid var(--bd); border-radius:12px; padding:11px;}
+  .binput,.btext{width:100%; box-sizing:border-box; background:var(--s1); border:0.5px solid var(--bd);
+    border-radius:8px; color:var(--tp); font-size:13.5px; font-family:inherit; padding:9px 10px;}
+  .btext{margin-top:8px; min-height:78px; resize:vertical; line-height:1.5;}
+  .binput:focus,.btext:focus{outline:none; border-color:var(--dn);}
+  .brow{display:flex; gap:7px; margin-top:8px; justify-content:flex-end;}
+  .bsave,.bcancel{font-size:12.5px; font-weight:600; padding:7px 14px; border-radius:8px; cursor:pointer; font-family:inherit; border:0.5px solid var(--bd);}
+  .bsave{background:var(--dn); color:#fff; border-color:var(--dn);}
+  .bcancel{background:var(--s1); color:var(--ts);}
+  .bcard{margin:0 16px 8px; background:var(--scr); border:0.5px solid var(--bd); border-radius:12px; padding:12px 13px;}
+  .bcard.notice{border-left:2.5px solid var(--warn);}
+  .bc-hd{display:flex; align-items:baseline; justify-content:space-between; gap:8px;}
+  .bc-title{font-size:14px; font-weight:700; color:var(--tp);}
+  .bc-meta{font-size:11px; color:var(--tm); white-space:nowrap;}
+  .bc-body{font-size:13px; color:var(--ts); line-height:1.6; margin-top:6px; white-space:pre-wrap; word-break:break-word;}
+  .bc-del{font-size:11px; color:var(--tm); background:none; border:0; cursor:pointer; font-family:inherit; margin-left:8px;}
+  .bc-del:active{color:var(--up);}
+  .cmts{margin-top:10px; border-top:0.5px solid var(--bd); padding-top:8px;}
+  .cmt{display:flex; gap:7px; padding:5px 0; font-size:12.5px; line-height:1.5;}
+  .cmt .who{color:var(--warn); font-weight:600; flex:none;}
+  .cmt .ctext{color:var(--ts); white-space:pre-wrap; word-break:break-word; flex:1;}
+  .cmt .ctime{color:var(--tm); font-size:10.5px; flex:none;}
+  .cmtform{display:flex; gap:6px; margin-top:8px;}
+  .cmtform input{flex:1; background:var(--s1); border:0.5px solid var(--bd); border-radius:8px;
+    color:var(--tp); font-size:12.5px; font-family:inherit; padding:7px 9px;}
+  .cmtform input:focus{outline:none; border-color:var(--dn);}
+  .cmtform button{font-size:12px; font-weight:600; padding:0 12px; border-radius:8px; border:0.5px solid var(--dn);
+    background:var(--dn); color:#fff; cursor:pointer; font-family:inherit;}
 </style>
 </head>
 <body>
@@ -230,10 +261,31 @@
     <div class="ft" id="newsFoot"></div>
   </div>
 
+  <!-- ── 공지 & 문의 탭 ── -->
+  <div id="viewBoard" class="hide">
+    <div class="sec">공지사항 <button id="noticeAdd" class="addbtn" style="display:none">+ 작성</button></div>
+    <div id="noticeForm" class="bform" style="display:none">
+      <input id="ntTitle" class="binput" maxlength="200" placeholder="공지 제목">
+      <textarea id="ntBody" class="btext" maxlength="5000" placeholder="공지 내용"></textarea>
+      <div class="brow"><button id="ntSave" class="bsave">등록</button><button id="ntCancel" class="bcancel">취소</button></div>
+    </div>
+    <div class="list" id="noticeList"></div>
+
+    <div class="sec">문의 / 개선사항 <button id="postAdd" class="addbtn">+ 작성</button></div>
+    <div id="postForm" class="bform" style="display:none">
+      <input id="ptTitle" class="binput" maxlength="200" placeholder="제목">
+      <textarea id="ptBody" class="btext" maxlength="5000" placeholder="문의 또는 개선 아이디어를 남겨주세요"></textarea>
+      <div class="brow"><button id="ptSave" class="bsave">등록</button><button id="ptCancel" class="bcancel">취소</button></div>
+    </div>
+    <div class="list" id="postList"></div>
+    <div class="ft" id="boardFoot"></div>
+  </div>
+
   <div class="tabbar">
     <button id="tabTheme" class="on"><svg class="ico" viewBox="0 0 24 24" width="21" height="21" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 17l5-5 4 4 9-9"/><path d="M17 7h4v4"/></svg><span>테마</span></button>
     <button id="tabWarn"><svg class="ico" viewBox="0 0 24 24" width="21" height="21" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="10.5" cy="10.5" r="6.5"/><path d="M20 20l-4.2-4.2"/></svg><span>투경</span></button>
     <button id="tabNews"><svg class="ico" viewBox="0 0 24 24" width="21" height="21" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5h13v14H6a2 2 0 0 1-2-2V5z"/><path d="M17 8h2a1 1 0 0 1 1 1v8a2 2 0 0 1-2 2"/><path d="M7 8h7M7 11h7M7 14h4"/></svg><span>뉴스</span></button>
+    <button id="tabBoard"><svg class="ico" viewBox="0 0 24 24" width="21" height="21" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 10h8M8 14h5"/><path d="M21 11.5a8.38 8.38 0 0 1-9 8.5 9 9 0 0 1-4-1l-4 1 1-4a8.5 8.5 0 0 1 3-11.5 8.38 8.38 0 0 1 13 3.5 8.5 8.5 0 0 1 1 4.5z"/></svg><span>공지·문의</span></button>
   </div>
 </div>
 
@@ -555,6 +607,94 @@
       .catch(function(){ if(tab==='warn') document.getElementById('sub').textContent='시장경보 데이터를 불러오지 못했습니다.'; });
   }
 
+  // ── 공지 · 문의 게시판 ──
+  var ME={username:'',role:'user',is_admin:false,is_owner:false};
+  var lastBoard=null;
+  fetch('/api/me').then(function(r){return r.json();}).then(function(u){ ME=u; })
+    .catch(function(){});
+  function bTime(s){ return (s||'').slice(5,16); }   // 'MM-DD HH:MM'
+
+  function noticeCard(n){
+    var del = ME.is_owner ? '<button class="bc-del" onclick="ntDelete('+n.id+')">삭제</button>' : '';
+    var edited = n.updated_at ? ' · 수정' : '';
+    return '<div class="bcard notice"><div class="bc-hd"><span class="bc-title">'+esc(n.title)+
+      '</span><span class="bc-meta">'+esc(bTime(n.created_at))+edited+del+'</span></div>'+
+      '<div class="bc-body">'+esc(n.body)+'</div></div>';
+  }
+  function cmtRow(c){
+    var del = ME.is_admin ? '<button class="bc-del" onclick="cmtDelete('+c.id+')">×</button>' : '';
+    return '<div class="cmt"><span class="who">'+esc(c.username)+'</span>'+
+      '<span class="ctext">'+esc(c.body)+'</span>'+
+      '<span class="ctime">'+esc(bTime(c.created_at))+del+'</span></div>';
+  }
+  function postCard(p){
+    var canDel = ME.is_admin || (ME.username && p.username===ME.username);
+    var del = canDel ? '<button class="bc-del" onclick="postDelete('+p.id+')">삭제</button>' : '';
+    var cmts = (p.comments||[]).map(cmtRow).join('');
+    var cform = ME.is_admin
+      ? '<div class="cmtform"><input id="cmt-'+p.id+'" maxlength="3000" placeholder="관리자 답변"'+
+        ' onkeydown="if(event.key===\'Enter\')addComment('+p.id+')"><button onclick="addComment('+p.id+')">답변</button></div>'
+      : '';
+    var cwrap = (cmts||cform) ? '<div class="cmts">'+cmts+cform+'</div>' : '';
+    return '<div class="bcard"><div class="bc-hd"><span class="bc-title">'+esc(p.title)+
+      '</span><span class="bc-meta">'+esc(p.username||'익명')+' · '+esc(bTime(p.created_at))+del+'</span></div>'+
+      '<div class="bc-body">'+esc(p.body)+'</div>'+cwrap+'</div>';
+  }
+  function renderBoard(d){
+    document.getElementById('noticeAdd').style.display = ME.is_owner ? '' : 'none';
+    var nl=d.notices||[], pl=d.posts||[];
+    document.getElementById('noticeList').innerHTML = nl.length
+      ? nl.map(noticeCard).join('') : '<div class="empty">등록된 공지가 없습니다.</div>';
+    document.getElementById('postList').innerHTML = pl.length
+      ? pl.map(postCard).join('') : '<div class="empty">아직 문의가 없습니다. 처음으로 남겨보세요.</div>';
+    document.getElementById('boardFoot').textContent = '공지 '+nl.length+' · 문의 '+pl.length;
+  }
+  function loadBoard(cb){
+    fetch('/api/board',{cache:'no-store'}).then(function(r){return r.json();})
+      .then(function(d){ lastBoard=d; renderBoard(d); if(cb)cb(d); })
+      .catch(function(){ document.getElementById('boardFoot').textContent='불러오지 못했습니다.'; });
+  }
+  function bPost(url, fields, done){
+    var fd=new FormData(); for(var k in fields) fd.append(k, fields[k]);
+    fetch(url,{method:'POST',body:fd}).then(function(r){return r.json();})
+      .then(function(j){ if(j.status!=='ok'){ alert(j.detail||'처리하지 못했습니다.'); return; } if(done)done(); loadBoard(); })
+      .catch(function(){ alert('네트워크 오류'); });
+  }
+  // 공지 작성 폼
+  var nForm=document.getElementById('noticeForm');
+  document.getElementById('noticeAdd').addEventListener('click', function(){
+    nForm.style.display = nForm.style.display==='none' ? '' : 'none';
+  });
+  document.getElementById('ntCancel').addEventListener('click', function(){
+    nForm.style.display='none'; ntTitle.value=''; ntBody.value='';
+  });
+  document.getElementById('ntSave').addEventListener('click', function(){
+    bPost('/api/board/notice', {title:ntTitle.value, body:ntBody.value}, function(){
+      nForm.style.display='none'; ntTitle.value=''; ntBody.value='';
+    });
+  });
+  // 문의 작성 폼
+  var pForm=document.getElementById('postForm');
+  document.getElementById('postAdd').addEventListener('click', function(){
+    pForm.style.display = pForm.style.display==='none' ? '' : 'none';
+  });
+  document.getElementById('ptCancel').addEventListener('click', function(){
+    pForm.style.display='none'; ptTitle.value=''; ptBody.value='';
+  });
+  document.getElementById('ptSave').addEventListener('click', function(){
+    bPost('/api/board/post', {title:ptTitle.value, body:ptBody.value}, function(){
+      pForm.style.display='none'; ptTitle.value=''; ptBody.value='';
+    });
+  });
+  // 동적 동작
+  function ntDelete(id){ if(confirm('이 공지를 삭제할까요?')) bPost('/api/board/notice/'+id, {action:'delete'}); }
+  function postDelete(id){ if(confirm('이 글을 삭제할까요?')) bPost('/api/board/post/'+id+'/delete', {}); }
+  function cmtDelete(id){ if(confirm('이 답변을 삭제할까요?')) bPost('/api/board/comment/'+id+'/delete', {}); }
+  function addComment(pid){
+    var el=document.getElementById('cmt-'+pid); if(!el||!el.value.trim()) return;
+    bPost('/api/board/post/'+pid+'/comment', {body:el.value});
+  }
+
   // ── 탭 전환 ──
   var tab='theme';
   var badge=document.getElementById('badge');
@@ -563,10 +703,16 @@
     document.getElementById('viewTheme').classList.toggle('hide', t!=='theme');
     document.getElementById('viewWarn').classList.toggle('hide', t!=='warn');
     document.getElementById('viewNews').classList.toggle('hide', t!=='news');
+    document.getElementById('viewBoard').classList.toggle('hide', t!=='board');
     document.getElementById('tabTheme').classList.toggle('on', t==='theme');
     document.getElementById('tabWarn').classList.toggle('on', t==='warn');
     document.getElementById('tabNews').classList.toggle('on', t==='news');
-    if(t==='warn'){
+    document.getElementById('tabBoard').classList.toggle('on', t==='board');
+    if(t==='board'){
+      badge.className='live mkt'; badge.textContent='공지·문의';
+      document.getElementById('sub').textContent='공지사항과 문의/개선사항';
+      loadBoard();
+    }else if(t==='warn'){
       badge.className='live mkt'; badge.textContent='시장경보';
       if(lastAlert) renderWarn(lastAlert); else { document.getElementById('sub').textContent='불러오는 중…'; loadWarn(); }
     }else if(t==='news'){
@@ -580,6 +726,7 @@
   document.getElementById('tabTheme').addEventListener('click', function(){ selectTab('theme'); });
   document.getElementById('tabWarn').addEventListener('click', function(){ selectTab('warn'); });
   document.getElementById('tabNews').addEventListener('click', function(){ selectTab('news'); });
+  document.getElementById('tabBoard').addEventListener('click', function(){ selectTab('board'); });
   document.getElementById('upperToggle').addEventListener('click', function(){ upperExpanded=!upperExpanded; setUpperToggle(); });
 
   // 초기 로드
@@ -601,6 +748,7 @@
   }
   rbtn.addEventListener('click', function(){
     if(tab==='warn'){ rbtn.classList.add('spin'); loadWarn(function(){ rbtn.classList.remove('spin'); }); return; }
+    if(tab==='board'){ rbtn.classList.add('spin'); loadBoard(function(){ rbtn.classList.remove('spin'); }); return; }
     if(refreshing) return;
     refreshing=true; rbtn.classList.add('spin');
     var before=lastUpdated;

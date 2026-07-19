@@ -6,6 +6,7 @@
 
 CLI:
   python3 auth.py create-admin <아이디> <비밀번호>   # 최초 관리자 시딩
+  python3 auth.py set-owner <아이디>                  # 계정을 owner(공지 작성 권한)로
   python3 auth.py list                                # 계정 목록
   python3 auth.py set-pw <아이디> <새비밀번호>        # 비밀번호 재설정
 """
@@ -18,8 +19,11 @@ from werkzeug.security import generate_password_hash, check_password_hash
 BASE = os.path.dirname(os.path.abspath(__file__))
 DB = os.path.join(BASE, "users.db")
 
-# 신규 가입 기본 상태. 'pending'=관리자 승인 필요(권장), 'active'=자동 승인.
-DEFAULT_SIGNUP_STATUS = "pending"
+# 신규 가입 기본 상태. 'pending'=관리자 승인 필요, 'active'=자동 승인.
+DEFAULT_SIGNUP_STATUS = "active"
+
+# 역할: user < admin < owner.  owner 는 관리자 권한 + 공지 작성 권한.
+ROLES = ("user", "admin", "owner")
 
 
 def _now() -> str:
@@ -153,11 +157,20 @@ def set_status(uid, status):
 
 
 def set_role(uid, role):
-    if role not in ("user", "admin"):
+    if role not in ROLES:
         return False
     with _conn() as c:
         cur = c.execute("UPDATE users SET role=? WHERE id=?", (role, uid))
         return cur.rowcount > 0
+
+
+def is_admin(u) -> bool:
+    """관리자 권한(admin 또는 owner) 보유 여부."""
+    return bool(u) and u.get("role") in ("admin", "owner")
+
+
+def is_owner(u) -> bool:
+    return bool(u) and u.get("role") == "owner"
 
 
 def delete_user(uid):
@@ -238,6 +251,14 @@ def _cli():
     if cmd == "create-admin" and len(sys.argv) >= 4:
         uid, err = create_user(sys.argv[2], sys.argv[3], role="admin", status="active")
         print("에러:", err) if err else print(f"관리자 생성 완료 (id={uid}, {sys.argv[2]})")
+    elif cmd == "set-owner" and len(sys.argv) >= 3:
+        u = get_user_by_name(sys.argv[2])
+        if not u:
+            print("해당 아이디 없음:", sys.argv[2])
+        else:
+            set_role(u["id"], "owner")
+            set_status(u["id"], "active")
+            print(f"owner 로 설정 완료 ({sys.argv[2]}) — 공지 작성 권한 부여")
     elif cmd == "set-pw" and len(sys.argv) >= 4:
         print("변경 완료" if set_password(sys.argv[2], sys.argv[3]) else "해당 아이디 없음")
     elif cmd == "list":
