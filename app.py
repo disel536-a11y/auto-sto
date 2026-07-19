@@ -54,11 +54,47 @@ def _load_secret_key() -> str:
 
 
 app.secret_key = _load_secret_key()
+
+
+def _https_only() -> bool:
+    """HTTPS 전용 쿠키 여부. 기본 True. http 로 되돌리려면 config.HTTPS_ONLY=False."""
+    try:
+        import config
+        return bool(getattr(config, "HTTPS_ONLY", True))
+    except Exception:
+        return True
+
+
 app.config.update(
     SESSION_COOKIE_HTTPONLY=True,
     SESSION_COOKIE_SAMESITE="Lax",
+    SESSION_COOKIE_SECURE=_https_only(),           # https 로만 쿠키 전송
     PERMANENT_SESSION_LIFETIME=60 * 60 * 24 * 14,  # 14일
 )
+
+
+@app.after_request
+def _security_headers(resp):
+    resp.headers.setdefault("X-Content-Type-Options", "nosniff")
+    resp.headers.setdefault("X-Frame-Options", "DENY")
+    resp.headers.setdefault("Referrer-Policy", "same-origin")
+    if request.headers.get("X-Forwarded-Proto") == "https":
+        resp.headers.setdefault("Strict-Transport-Security", "max-age=31536000")
+    return resp
+
+
+# ── 간단한 요청 빈도 제한 (무차별 대입/스팸 방지, 메모리 기반) ──
+_RL = {}
+
+
+def _rate_ok(key, limit, window_sec) -> bool:
+    now = time.time()
+    lst = [t for t in _RL.get(key, []) if now - t < window_sec]
+    ok = len(lst) < limit
+    if ok:
+        lst.append(now)
+    _RL[key] = lst
+    return ok
 auth.init_db()
 board.init_db()
 
@@ -125,15 +161,20 @@ def login():
         return redirect(url_for("index"))
     error = None
     if request.method == "POST":
+        if not _rate_ok(("login", _client_ip()), 15, 600):   # IP당 10분에 15회
+            error = "시도가 너무 많습니다. 잠시 후 다시 시도하세요."
+            return render_template_string(LOGIN_HTML, error=error, mode="login")
         un = request.form.get("username", "")
         pw = request.form.get("password", "")
         u, err = auth.verify_login(un, pw)
         auth.log_login(un, _client_ip(), request.headers.get("User-Agent"), bool(u))
         if u:
+            session.clear()                       # 세션 고정 방지: 새 세션으로 시작
             session.permanent = True
             session["uid"] = u["id"]
             nxt = request.args.get("next") or url_for("index")
-            if not nxt.startswith("/"):
+            # '//evil.com' 같은 프로토콜 상대 주소로의 납치 차단
+            if not nxt.startswith("/") or nxt.startswith("//"):
                 nxt = url_for("index")
             return redirect(nxt)
         error = err
@@ -147,6 +188,9 @@ def register():
     error = None
     done = False
     if request.method == "POST":
+        if not _rate_ok(("reg", _client_ip()), 5, 3600):     # IP당 1시간에 5회
+            error = "가입 시도가 너무 많습니다. 잠시 후 다시 시도하세요."
+            return render_template_string(LOGIN_HTML, error=error, mode="register", done=False)
         un = request.form.get("username", "")
         pw = request.form.get("password", "")
         pw2 = request.form.get("password2", "")
@@ -237,6 +281,8 @@ def api_notice_edit(nid):
 @login_required
 def api_post_create():
     u = current_user()
+    if not _rate_ok(("post", u["id"]), 10, 3600):            # 유저당 1시간에 10개
+        return jsonify(status="error", detail="작성이 너무 잦습니다. 잠시 후 다시 시도하세요."), 429
     pid, err = board.create_post(u, request.form.get("title"), request.form.get("body"))
     return (jsonify(status="error", detail=err), 400) if err else jsonify(status="ok", id=pid)
 
@@ -259,6 +305,8 @@ def api_post_delete(pid):
 def api_comment_create(pid):
     """문의 댓글 = admin/owner 전용."""
     u = current_user()
+    if not _rate_ok(("cmt", u["id"]), 30, 3600):
+        return jsonify(status="error", detail="작성이 너무 잦습니다."), 429
     cid, err = board.add_comment(pid, u, request.form.get("body"))
     return (jsonify(status="error", detail=err), 400) if err else jsonify(status="ok", id=cid)
 
@@ -477,7 +525,7 @@ ADMIN_HTML = r"""<!DOCTYPE html>
   </tr></thead><tbody></tbody></table></div>
 </div>
 <script>
-const esc=s=>String(s==null?'':s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const esc=s=>String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 async function load(){
   const r=await fetch('/api/admin/overview'); const d=await r.json();
   const c=d.counts, s=d.stats;
@@ -534,12 +582,14 @@ load();
 
 
 if __name__ == "__main__":
-    # HTTPS 도입 후에는 nginx(80/443) → Flask(8000) 구조.
-    # 필요하면 config.py 의 PORT 로 덮어쓸 수 있다(예전처럼 80 직접 쓰려면 PORT=80).
-    port = 8000
+    # HTTPS 도입 후에는 nginx(80/443) → Flask(127.0.0.1:8000) 구조.
+    # 127.0.0.1 바인딩이라 외부에서 8000 포트로 nginx 를 우회해 직접 접속할 수 없다.
+    # 필요 시 config.py 의 PORT / HOST 로 덮어쓸 수 있다.
+    host, port = "127.0.0.1", 8000
     try:
         import config
         port = int(getattr(config, "PORT", port))
+        host = str(getattr(config, "HOST", host))
     except Exception:
         pass
-    app.run(host="0.0.0.0", port=port)
+    app.run(host=host, port=port)

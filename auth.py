@@ -75,14 +75,18 @@ def init_db():
 
 
 # ── 계정 ────────────────────────────────────────────────
+import re as _re
+_USERNAME_RE = _re.compile(r"^[A-Za-z0-9가-힣._-]{3,20}$")
+
+
 def create_user(username, password, role="user", status=None):
     username = (username or "").strip()
     if not username or not password:
         return None, "아이디와 비밀번호를 입력하세요."
-    if len(username) < 3:
-        return None, "아이디는 3자 이상이어야 합니다."
-    if len(password) < 4:
-        return None, "비밀번호는 4자 이상이어야 합니다."
+    if not _USERNAME_RE.match(username):
+        return None, "아이디는 3~20자의 한글/영문/숫자/._- 만 쓸 수 있습니다."
+    if len(password) < 8:
+        return None, "비밀번호는 8자 이상이어야 합니다."
     if status is None:
         status = DEFAULT_SIGNUP_STATUS
     try:
