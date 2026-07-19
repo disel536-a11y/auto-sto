@@ -13,11 +13,15 @@ CLI:
 import os
 import sys
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timedelta
 from werkzeug.security import generate_password_hash, check_password_hash
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 DB = os.path.join(BASE, "users.db")
+
+# 로그 보존 한도: 상세 조회로그는 90일치만 두고, 그 이전은 일별 집계로 압축 보존.
+PV_RETENTION_DAYS = 90
+LOGIN_LOG_MAX = 5000
 
 # 신규 가입 기본 상태. 'pending'=관리자 승인 필요, 'active'=자동 승인.
 DEFAULT_SIGNUP_STATUS = "active"
@@ -72,6 +76,12 @@ def init_db():
         )""")
         c.execute("CREATE INDEX IF NOT EXISTS idx_pv_day ON pageviews(day)")
         c.execute("CREATE INDEX IF NOT EXISTS idx_pv_user ON pageviews(user_id)")
+        # 오래된 조회로그의 일별 집계 보관소(원본 삭제 후에도 통계 유지)
+        c.execute("""CREATE TABLE IF NOT EXISTS pv_daily(
+            day      TEXT PRIMARY KEY,
+            views    INTEGER NOT NULL,
+            visitors INTEGER NOT NULL
+        )""")
 
 
 # ── 계정 ────────────────────────────────────────────────
@@ -184,9 +194,32 @@ def delete_user(uid):
 
 
 # ── 로깅 ────────────────────────────────────────────────
+_last_prune_day = None
+
+
+def _prune(c):
+    """하루 1회: 90일 지난 조회로그를 일별 집계로 옮기고 원본 삭제.
+    로그인 기록은 최근 LOGIN_LOG_MAX 건만 유지."""
+    global _last_prune_day
+    today = _today()
+    if _last_prune_day == today:
+        return
+    _last_prune_day = today
+    cutoff = (datetime.now() - timedelta(days=PV_RETENTION_DAYS)).strftime("%Y-%m-%d")
+    c.execute(
+        "INSERT OR REPLACE INTO pv_daily(day, views, visitors) "
+        "SELECT day, COUNT(*), COUNT(DISTINCT COALESCE(user_id, ip)) "
+        "FROM pageviews WHERE day < ? GROUP BY day", (cutoff,))
+    c.execute("DELETE FROM pageviews WHERE day < ?", (cutoff,))
+    c.execute(
+        "DELETE FROM login_log WHERE id <= "
+        "(SELECT COALESCE(MAX(id),0) FROM login_log) - ?", (LOGIN_LOG_MAX,))
+
+
 def log_pageview(user, path, ip, ua):
     try:
         with _conn() as c:
+            _prune(c)
             c.execute(
                 "INSERT INTO pageviews(user_id, username, path, ip, ua, ts, day) "
                 "VALUES(?,?,?,?,?,?,?)",
@@ -213,7 +246,9 @@ def log_login(username, ip, ua, ok):
 def stats(days=14):
     """관리자 대시보드용 집계."""
     with _conn() as c:
-        total_views = c.execute("SELECT COUNT(*) FROM pageviews").fetchone()[0]
+        # 누적 = 압축 보관된 과거 집계 + 현재 남아있는 상세 로그
+        archived = c.execute("SELECT COALESCE(SUM(views),0) FROM pv_daily").fetchone()[0]
+        total_views = archived + c.execute("SELECT COUNT(*) FROM pageviews").fetchone()[0]
         today_views = c.execute("SELECT COUNT(*) FROM pageviews WHERE day=?",
                                 (_today(),)).fetchone()[0]
         today_visitors = c.execute(
