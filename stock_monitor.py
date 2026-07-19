@@ -702,7 +702,8 @@ def analyze_themes(market: dict) -> list:
             used.add(c)
         if not members:
             continue
-        members.sort(key=lambda x: x["등락률"], reverse=True)
+        _record_upper_ts(members)
+        members.sort(key=_member_sort_key)   # 상한가는 먼저 간 순, 나머지는 상승률순
         groups.append({
             "테마": (t.get("테마") or "기타").strip(),
             "요약": (t.get("요약") or "").strip(),
@@ -714,7 +715,8 @@ def analyze_themes(market: dict) -> list:
     # 미분류 종목 → 기타 급등
     leftover = [enrich(s) for s in uni if s["코드"] not in used]
     if leftover:
-        leftover.sort(key=lambda x: x["등락률"], reverse=True)
+        _record_upper_ts(leftover)
+        leftover.sort(key=_member_sort_key)
         groups.append({"테마": "기타 급등주", "요약": "", "종목": leftover,
                        "_amount": sum(m.get("거래대금", 0) for m in leftover)})
 
@@ -1001,6 +1003,18 @@ def _load_upper_ts() -> dict:
     return _upper_ts_cache
 
 
+def _member_sort_key(m, ts=None):
+    """테마 내 종목 정렬 키.
+    상한가 종목: '먼저 상한가 간' 순(진입시각 오름차순, 미기록은 뒤) →
+    그 외: 상승률 높은 순.  예) 시초가 상한가(09:00 기록)가 늦은 상한가보다 위."""
+    if ts is None:
+        ts = _load_upper_ts()
+    rate = m.get("등락률", 0) or 0
+    if rate >= UPPER_LIMIT_THRESHOLD:
+        return (0, ts.get(m.get("코드", ""), "99:99:99"), -rate)
+    return (1, "", -rate)
+
+
 def _record_upper_ts(members: list) -> dict:
     """members 중 상한가(≥THRESHOLD) 종목의 '최초' 진입 시각을 기록(이미 있으면 유지).
     변경이 있으면 파일에 저장. 반환값은 오늘자 {code: 'HH:MM:SS'} 맵."""
@@ -1271,7 +1285,9 @@ def refresh_group_prices(groups: list, market: dict) -> list:
                 m["거래대금"] = fresh["거래대금"]
             if fresh.get("시총억"):
                 m["시총억"] = fresh["시총억"]
-        g.get("종목", []).sort(key=lambda x: x.get("등락률", 0), reverse=True)
+        # 새로 상한가 도달한 종목의 진입시각을 이번 스캔에서 기록한 뒤 정렬
+        _record_upper_ts(g.get("종목", []))
+        g.get("종목", []).sort(key=_member_sort_key)
     return groups
 
 
@@ -1319,9 +1335,10 @@ def run_once():
 
     stocks = list(market["all"].values())
 
-    # ① 상한가 알림 (+ 테마/뉴스 요약)
-    upper = sorted([s for s in stocks if s["등락률"] >= UPPER_LIMIT_THRESHOLD],
-                   key=lambda x: x["등락률"], reverse=True)
+    # ① 상한가 알림 (+ 테마/뉴스 요약) — 먼저 상한가 간 순
+    upper = [s for s in stocks if s["등락률"] >= UPPER_LIMIT_THRESHOLD]
+    _record_upper_ts(upper)
+    upper.sort(key=_member_sort_key)
     theme_map = {}
     if upper:
         print(f"② 상한가 {len(upper)}종목 → 뉴스/테마 분석 중...", flush=True)
@@ -1403,8 +1420,10 @@ def main():
         stocks = list(market["all"].values())
 
         # ① 상한가 — 매 스캔 최신 목록(등락률 즉시 반영). 신규는 카톡, 수동새로고침 시 전체 재분류
-        upper_all = sorted([s for s in stocks if s["등락률"] >= UPPER_LIMIT_THRESHOLD],
-                           key=lambda x: x["등락률"], reverse=True)
+        #    정렬: 먼저 상한가 간 순(진입시각 파일 기록 기반)
+        upper_all = [s for s in stocks if s["등락률"] >= UPPER_LIMIT_THRESHOLD]
+        _record_upper_ts(upper_all)
+        upper_all.sort(key=_member_sort_key)
         new_upper = [s for s in upper_all if s["코드"] not in alerted]
         classify_targets = upper_all if force_refresh else new_upper
         if classify_targets:
