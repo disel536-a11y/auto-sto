@@ -220,7 +220,8 @@
     menu.addEventListener('click',function(e){e.stopPropagation();});
     fetch('/api/me').then(function(r){return r.json();}).then(function(u){
       document.getElementById('acctWho').textContent='@'+u.username;
-      if(u.role==='admin') document.getElementById('acctAdmin').style.display='block';
+      // owner 도 관리자 페이지 접근 가능 — is_admin(admin|owner) 기준으로 판단
+      if(u.is_admin || u.role==='admin') document.getElementById('acctAdmin').style.display='block';
     }).catch(function(){});
   })();
   </script>
