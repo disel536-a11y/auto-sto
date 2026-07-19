@@ -615,7 +615,7 @@
   function bTime(s){ return (s||'').slice(5,16); }   // 'MM-DD HH:MM'
 
   function noticeCard(n){
-    var del = ME.is_owner ? '<button class="bc-del" onclick="ntDelete('+n.id+')">삭제</button>' : '';
+    var del = ME.is_admin ? '<button class="bc-del" onclick="ntDelete('+n.id+')">삭제</button>' : '';
     var edited = n.updated_at ? ' · 수정' : '';
     return '<div class="bcard notice"><div class="bc-hd"><span class="bc-title">'+esc(n.title)+
       '</span><span class="bc-meta">'+esc(bTime(n.created_at))+edited+del+'</span></div>'+
@@ -641,7 +641,7 @@
       '<div class="bc-body">'+esc(p.body)+'</div>'+cwrap+'</div>';
   }
   function renderBoard(d){
-    document.getElementById('noticeAdd').style.display = ME.is_owner ? '' : 'none';
+    document.getElementById('noticeAdd').style.display = ME.is_admin ? '' : 'none';
     var nl=d.notices||[], pl=d.posts||[];
     document.getElementById('noticeList').innerHTML = nl.length
       ? nl.map(noticeCard).join('') : '<div class="empty">등록된 공지가 없습니다.</div>';

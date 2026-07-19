@@ -215,7 +215,7 @@ def api_board():
 
 
 @app.route("/api/board/notice", methods=["POST"])
-@owner_required
+@admin_required
 def api_notice_create():
     u = current_user()
     nid, err = board.create_notice(request.form.get("title"),
@@ -224,7 +224,7 @@ def api_notice_create():
 
 
 @app.route("/api/board/notice/<int:nid>", methods=["POST"])
-@owner_required
+@admin_required
 def api_notice_edit(nid):
     action = request.form.get("action", "edit")
     if action == "delete":
