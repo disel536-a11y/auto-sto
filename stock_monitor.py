@@ -1122,29 +1122,9 @@ def compute_match(groups: list) -> list:
 UPPER_STREAK_FILE = os.path.join(_BASE_DIR, "upper_streak.json")
 
 # 2026 공휴일(연속 상한가 영업일 판정용) — krx_alert.py 와 동일 목록
-_HOLIDAYS_2026 = {
-    "2026-01-01",
-    "2026-02-16", "2026-02-17", "2026-02-18",          # 설날(2026-02-17)
-    "2026-03-01", "2026-03-02",                        # 삼일절 + 대체
-    "2026-05-01", "2026-05-05",                        # 근로자의날, 어린이날
-    "2026-06-03", "2026-06-06",                        # 지방선거일, 현충일
-    "2026-07-17",                                      # 제헌절(2026년 공휴일 부활)
-    "2026-08-15", "2026-08-17",                        # 광복절 + 대체
-    "2026-09-24", "2026-09-25", "2026-09-26",          # 추석(2026-09-25)
-    "2026-10-03", "2026-10-05", "2026-10-09",          # 개천절 + 대체, 한글날
-    "2026-12-25", "2026-12-31",                        # 성탄절, 연말 휴장
-}
-
-
-def _is_bday(d) -> bool:
-    return d.weekday() < 5 and d.isoformat() not in _HOLIDAYS_2026
-
-
-def _prev_bday(d):
-    d = d - timedelta(days=1)
-    while not _is_bday(d):
-        d -= timedelta(days=1)
-    return d
+# 거래일 달력은 market_calendar 로 통일(공휴일 표 중복 제거).
+# _prev_bday 는 기존과 동일하게 '직전 거래일'(오늘 제외) 의미 → prev_bday 매핑.
+from market_calendar import HOLIDAYS as _HOLIDAYS_2026, is_bday as _is_bday, prev_bday as _prev_bday  # noqa: E402
 
 
 def _read_streak_file() -> dict:

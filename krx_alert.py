@@ -44,49 +44,11 @@ DATA_URL = "https://open.krx.co.kr/contents/OPN/99/OPN99000001.jspx"
 KIND_HALT_URL = "https://kind.krx.co.kr/investwarn/tradinghaltissue.do"
 KIND_DISC_URL = "https://kind.krx.co.kr/disclosure/todaydisclosure.do"
 
-# 2026년 한국 공휴일(경과거래일수 계산용) - 스킬과 동일
-HOLIDAYS = {
-    "2026-01-01",
-    "2026-02-16", "2026-02-17", "2026-02-18",          # 설날(2026-02-17)
-    "2026-03-01", "2026-03-02",                        # 삼일절 + 대체
-    "2026-05-01", "2026-05-05",                        # 근로자의날, 어린이날
-    "2026-06-03", "2026-06-06",                        # 지방선거일, 현충일
-    "2026-07-17",                                      # 제헌절(2026년 공휴일 부활)
-    "2026-08-15", "2026-08-17",                        # 광복절 + 대체
-    "2026-09-24", "2026-09-25", "2026-09-26",          # 추석(2026-09-25)
-    "2026-10-03", "2026-10-05", "2026-10-09",          # 개천절 + 대체, 한글날
-    "2026-12-25", "2026-12-31",                        # 성탄절, 연말 휴장
-}
-
-
-# ── 날짜 유틸 ─────────────────────────────────────────────
-def is_bday(d: dt.date) -> bool:
-    return d.weekday() < 5 and d.isoformat() not in HOLIDAYS
-
-
-def prev_bday(d: dt.date) -> dt.date:
-    while not is_bday(d):
-        d -= dt.timedelta(days=1)
-    return d
-
-
-def next_bday(d: dt.date) -> dt.date:
-    d += dt.timedelta(days=1)
-    while not is_bday(d):
-        d += dt.timedelta(days=1)
-    return d
-
-
-def busday_count(a: dt.date, b: dt.date) -> int:
-    """[a, b) 구간의 영업일 수 (np.busday_count 과 동일 정의)."""
-    if a >= b:
-        return 0
-    n, cur = 0, a
-    while cur < b:
-        if is_bday(cur):
-            n += 1
-        cur += dt.timedelta(days=1)
-    return n
+# 거래일 달력은 market_calendar 로 통일(공휴일 표 중복 제거).
+# 주의: 이 파일의 기존 prev_bday 는 '오늘 포함 그 이하 마지막 거래일'(floor)
+#       의미였으므로 market_calendar.last_bday 로 매핑한다.
+from market_calendar import (HOLIDAYS, is_bday, next_bday, busday_count,
+                             last_bday as prev_bday)
 
 
 # ── 실제 거래일 달력 ──────────────────────────────────────
