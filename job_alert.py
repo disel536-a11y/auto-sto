@@ -71,7 +71,7 @@ DEFENSE_COMPANIES = ["Lockheed Martin", "Collins Aerospace", "Raytheon", "RTX",
                      "General Dynamics", "Boeing Defense"]
 # 워치 대기업 — 링크드인 회사명 검색(한국 위치). 삼성 반도체/RX 등 관련직만 통과.
 SAMSUNG_COMPANIES = ["Samsung Electronics", "Samsung Semiconductor", "Samsung DS",
-                     "Samsung Electro-Mechanics", "삼성전자"]
+                     "Samsung Electro-Mechanics", "Samsung Robotics", "삼성전자"]
 
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
@@ -436,6 +436,41 @@ def crawl_samsung():
     return _crawl_companies(SAMSUNG_COMPANIES, "삼성", "sg", relevant_only=True)
 
 
+def crawl_samsung_ds():
+    """삼성전자 DS부문(반도체) 경력 채용 — jdLoad.php 최신 목록. 파이프(|) 구분 필드."""
+    try:
+        r = requests.post(
+            "https://www.samsung-dsrecruit.com/set/jdLoad.php",
+            headers={"User-Agent": UA, "Content-Type": "application/x-www-form-urlencoded",
+                     "Referer": "https://www.samsung-dsrecruit.com/recruits/job_description/index.php"},
+            data="", timeout=15)
+        r.raise_for_status()
+        j = r.json()
+    except Exception as e:
+        print(f"  [삼성DS] 오류: {e}")
+        return []
+    titles = j.get("result_titie", "").split("|")     # (사이트 필드명이 titie로 오타)
+    divs = j.get("result_division", "").split("|")
+    nums = j.get("result_number", "").split("|")
+    duties = j.get("result_duty", "").split("|")
+    out = []
+    for i, title in enumerate(titles):
+        title = title.strip()
+        if not title:
+            continue
+        div = divs[i].strip() if i < len(divs) else ""
+        num = nums[i].strip() if i < len(nums) else ""
+        duty = duties[i].strip() if i < len(duties) else ""
+        out.append({"id": f"sds_{num or i}", "title": title,
+                    "company": (f"삼성전자 DS {div}").strip(),
+                    "location": "대한민국",
+                    "desc": f"{title} | {div} | {duty}"[:600],
+                    "source": "삼성DS",
+                    "url": "https://www.samsung-dsrecruit.com/recruits/job_description/index.php"})
+    print(f"  [삼성DS] 수집 {len(out)} (총 {j.get('result_count','?')}건 중 최신)")
+    return out
+
+
 # ══════════════════════════════════════════════════
 #  이력서 맥락 배치 스코어링 (Claude API, 하루 1회)
 # ══════════════════════════════════════════════════
@@ -617,16 +652,17 @@ def run(dry=False):
     broad = crawl_wanted() + crawl_linkedin()          # 광범위 검색 → 엄격 필터
     domestic = crawl_saramin() + crawl_jobkorea() + crawl_incruit()  # 국내보드 타겟 검색 → 완화 필터
     defense = crawl_defense()                           # 방산 프라임 한국 포지션
-    samsung = crawl_samsung()                            # 삼성 반도체/관련직 한국 포지션
-    print(f"   총 수집 {len(broad)+len(domestic)+len(defense)+len(samsung)}건 "
-          f"(광범위 {len(broad)} / 국내보드 {len(domestic)} / 방산 {len(defense)} / 삼성 {len(samsung)})", flush=True)
-    if not (broad or domestic or defense or samsung):
+    samsung = crawl_samsung()                            # 삼성 반도체/로봇(RX) 관련 링크드인
+    samsung_ds = crawl_samsung_ds()                      # 삼성 DS부문(반도체) 자사 채용사이트
+    print(f"   총 수집 {len(broad)+len(domestic)+len(defense)+len(samsung)+len(samsung_ds)}건 "
+          f"(광범위 {len(broad)} / 국내 {len(domestic)} / 방산 {len(defense)} / 삼성 {len(samsung)} / 삼성DS {len(samsung_ds)})", flush=True)
+    if not (broad or domestic or defense or samsung or samsung_ds):
         print("   수집 0건 — 종료"); return
 
-    print("② 필터 (광범위=엄격 / 국내보드=완화 / 방산·삼성=회사·한국타겟 통과)...", flush=True)
+    print("② 필터 (광범위=엄격 / 국내=완화 / 방산·삼성·삼성DS=타겟 통과)...", flush=True)
     passed = [j for j in broad if passes_filter(j)]
     passed += [j for j in domestic if _looks_relevant(j["title"] + " " + j["desc"]) and _company_ok(j)]
-    passed += defense + samsung   # 회사명·한국 타겟이라 도메인필터 우회, 스코어러가 최종 판단
+    passed += defense + samsung + samsung_ds   # 타겟 소스 → 도메인필터 우회, 스코어러가 최종 판단
     # id 기준 중복 제거
     _seen, _uniq = set(), []
     for j in passed:
@@ -682,7 +718,7 @@ def _collect_passed():
     domestic = crawl_saramin() + crawl_jobkorea() + crawl_incruit()
     passed = [j for j in broad if passes_filter(j)]
     passed += [j for j in domestic if _looks_relevant(j["title"] + " " + j["desc"]) and _company_ok(j)]
-    passed += crawl_defense() + crawl_samsung()   # 방산·삼성 한국 포지션
+    passed += crawl_defense() + crawl_samsung() + crawl_samsung_ds()   # 방산·삼성·삼성DS
     seen, uniq = set(), []
     for j in passed:
         if j["id"] not in seen:
@@ -796,7 +832,7 @@ footer{{text-align:center;color:#9aa;font-size:11px;padding:14px 16px 28px;line-
 <header><div class="h">🔔 오늘의 채용 매칭 {n}건</div>
 <div class="sub">{today} 기준 · 이력서 맥락 AI 평가(3점↑) · 점수순</div></header>
 {body}
-<footer>원티드·링크드인·사람인·잡코리아·인크루트·방산·삼성 통합<br>
+<footer>원티드·링크드인·사람인·잡코리아·인크루트·방산·삼성·삼성DS 통합<br>
 HMG·중소중견 제외 · 매일 21:00 KST 자동 업데이트</footer>
 </body></html>"""
     path = os.path.join(_BASE_DIR, "passed_jobs.html")
