@@ -68,7 +68,7 @@ DOMESTIC_KEYWORDS = ["기술 프로그램 매니저", "테크니컬 프로그램
                      "테크니컬 프로덕트 매니저", "시스템 엔지니어", "양산 PM", "제품화 PM",
                      "NPI 매니저", "프로그램 매니저 로보틱스", "프로젝트 매니저 자율주행",
                      "프로그램 매니저 반도체", "PMO"]
-SCORE_MAX = 30              # 하루 AI 평가 상한(토큰·비용 보호)
+SCORE_MAX = 40              # 하루 AI 평가 상한(토큰·비용 보호)
 
 # 미국 방산·항공우주 프라임 — 한국 포지션이 뜨면 알림(링크드인 회사명 검색)
 DEFENSE_COMPANIES = ["Lockheed Martin", "Collins Aerospace", "Raytheon", "RTX",
@@ -133,6 +133,11 @@ def _looks_relevant(text):
     t = text.lower()
     return (any(k in t for k in PROFILE["keywords_role"]) or
             any(k in t for k in PROFILE["keywords_domain"]))
+
+def _has_role(text):
+    """지원자 '직무'(SE/TPM/PM·양산·프로그램관리) 키워드가 제목에 있는지 — 설계/공정 배제용."""
+    t = text.lower()
+    return any(k in t for k in PROFILE["keywords_role"])
 
 
 # ══════════════════════════════════════════════════
@@ -511,7 +516,7 @@ def score_batch(jobs, model=SCORE_MODEL):
         headers={"x-api-key": ANTHROPIC_API_KEY,
                  "anthropic-version": "2023-06-01",
                  "content-type": "application/json"},
-        json={"model": model, "max_tokens": 4096,   # 다건 평가 시 JSON 잘림 방지
+        json={"model": model, "max_tokens": 6000,   # 다건 평가 시 JSON 잘림 방지
               "messages": [{"role": "user", "content": prompt}]},
         timeout=90)
     r.raise_for_status()
@@ -668,7 +673,7 @@ def run(dry=False):
 
     print("② 필터 (광범위=엄격 / 국내=완화 / 방산·삼성·삼성DS=타겟 통과)...", flush=True)
     passed = [j for j in broad if passes_filter(j)]
-    passed += [j for j in domestic if _looks_relevant(j["title"] + " " + j["desc"]) and _company_ok(j)]
+    passed += [j for j in domestic if _has_role(j["title"]) and _company_ok(j)]
     passed += defense + samsung + samsung_ds   # 타겟 소스 → 도메인필터 우회, 스코어러가 최종 판단
     # id 기준 중복 제거
     _seen, _uniq = set(), []
@@ -724,7 +729,7 @@ def _collect_passed():
     broad = crawl_linkedin()
     domestic = crawl_wanted() + crawl_saramin() + crawl_jobkorea() + crawl_incruit()
     passed = [j for j in broad if passes_filter(j)]
-    passed += [j for j in domestic if _looks_relevant(j["title"] + " " + j["desc"]) and _company_ok(j)]
+    passed += [j for j in domestic if _has_role(j["title"]) and _company_ok(j)]
     passed += crawl_defense() + crawl_samsung() + crawl_samsung_ds()   # 방산·삼성·삼성DS
     seen, uniq = set(), []
     for j in passed:
