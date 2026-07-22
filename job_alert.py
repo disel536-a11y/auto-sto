@@ -61,13 +61,17 @@ LINKEDIN_MAX_DETAIL = 25    # 상세조회 최대 건수 — IP차단/속도 보
 
 # 국내 잡보드(사람인/잡코리아/인크루트) 검색 키워드 — 도메인·직무 타겟팅
 DOMESTIC_KEYWORDS = ["반도체 시스템 엔지니어", "NPU", "반도체 PM", "로보틱스 엔지니어",
-                     "자율주행 시스템", "반도체 양산", "휴머노이드", "프로그램 매니저 반도체"]
+                     "자율주행 시스템", "반도체 양산", "휴머노이드", "피지컬 AI",
+                     "프로그램 매니저 반도체"]
 SCORE_MAX = 30              # 하루 AI 평가 상한(토큰·비용 보호)
 
 # 미국 방산·항공우주 프라임 — 한국 포지션이 뜨면 알림(링크드인 회사명 검색)
 DEFENSE_COMPANIES = ["Lockheed Martin", "Collins Aerospace", "Raytheon", "RTX",
                      "Anduril", "Northrop Grumman", "L3Harris", "BAE Systems",
                      "General Dynamics", "Boeing Defense"]
+# 워치 대기업 — 링크드인 회사명 검색(한국 위치). 삼성 반도체/RX 등 관련직만 통과.
+SAMSUNG_COMPANIES = ["Samsung Electronics", "Samsung Semiconductor", "Samsung DS",
+                     "Samsung Electro-Mechanics", "삼성전자"]
 
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
@@ -84,8 +88,8 @@ PROFILE = {
                       "시스템 엔지니어", "시스템엔지니어", "프로그램 매니저", "프로그램 관리",
                       "프로젝트 매니저", "프로젝트 관리", "프로덕트 매니저", "pm"],
     "keywords_domain": ["npu", "semiconductor", "반도체", "ai chip", "humanoid", "휴머노이드",
-                        "robotics", "로보틱스", "로봇", "evtol", "autonomous", "자율주행",
-                        "mobility", "모빌리티", "soc", "ai 반도체"],
+                        "robotics", "로보틱스", "로봇", "physical ai", "피지컬", "evtol",
+                        "autonomous", "자율주행", "mobility", "모빌리티", "soc", "ai 반도체"],
     "seniority_signals": ["책임", "senior", "principal", "lead", "staff", "팀장", "director"],
     "location_must": ["korea", "한국", "서울", "seoul", "대한민국", "경기", "판교",
                       "성남", "인천", "화성", "용인", "수원", "대전"],
@@ -392,33 +396,44 @@ def crawl_incruit():
 # ══════════════════════════════════════════════════
 #  크롤러 — 미국 방산·항공우주 프라임 (링크드인 회사명 검색, 한국 위치)
 # ══════════════════════════════════════════════════
-def crawl_defense():
-    """방산 프라임 회사명으로 링크드인 검색(위치=한국) → 한국 포지션만."""
+_KR_LOC = ["korea", "한국", "서울", "seoul", "경기", "gyeonggi", "성남", "판교",
+           "화성", "인천", "대전", "대한민국", "용인", "수원", "기흥", "평택", "천안"]
+
+def _crawl_companies(companies, source, prefix, relevant_only=False, cap=15):
+    """회사명으로 링크드인 검색(위치=한국) → 한국 포지션 수집. 상세조회로 설명 확보."""
     out, listings = [], {}
-    for co in DEFENSE_COMPANIES:
+    for co in companies:
         try:
             for row in _parse_linkedin_cards(_linkedin_search(co, 0)):
                 row["_co"] = co
                 listings.setdefault(row["id"], row)
             time.sleep(1.5)
         except Exception as e:
-            print(f"  [방산/{co}] 오류: {e}")
-    kr = ["korea", "한국", "서울", "seoul", "경기", "gyeonggi", "성남", "판교",
-          "화성", "인천", "대전", "대한민국"]
-    for v in listings.values():
-        if not any(k in v["location"].lower() for k in kr):
-            continue   # 링크드인이 한국으로 필터하지만 이중 확인
+            print(f"  [{source}/{co}] 오류: {e}")
+    cands = [v for v in listings.values() if any(k in v["location"].lower() for k in _KR_LOC)]
+    if relevant_only:   # 삼성처럼 공고 많은 대기업은 제목 관련성으로 먼저 추림
+        cands = [v for v in cands if _looks_relevant(v["title"])]
+    cands = cands[:cap]
+    for v in cands:
         jid = v["id"]
         try:
             desc = _linkedin_detail(jid); time.sleep(0.8)
         except Exception:
             desc = v["title"]
-        out.append({"id": f"df_{jid}", "title": v["title"],
+        out.append({"id": f"{prefix}_{jid}", "title": v["title"],
                     "company": v["company"] or v.get("_co", ""),
                     "location": v["location"], "desc": (desc or v["title"])[:600],
-                    "source": "방산", "url": f"https://www.linkedin.com/jobs/view/{jid}"})
-    print(f"  [방산] 후보 {len(listings)} → 한국 {len(out)}")
+                    "source": source, "url": f"https://www.linkedin.com/jobs/view/{jid}"})
+    print(f"  [{source}] 후보 {len(listings)} → 한국 {len(cands)} → 수집 {len(out)}")
     return out
+
+def crawl_defense():
+    """미국 방산·항공우주 프라임 — 한국 포지션이면 모두 수집(희소하므로)."""
+    return _crawl_companies(DEFENSE_COMPANIES, "방산", "df", relevant_only=False)
+
+def crawl_samsung():
+    """삼성전자·반도체 — 공고 많으므로 관련 직무(반도체/SE/PM/로보틱스 등)만 수집."""
+    return _crawl_companies(SAMSUNG_COMPANIES, "삼성", "sg", relevant_only=True)
 
 
 # ══════════════════════════════════════════════════
@@ -601,16 +616,17 @@ def run(dry=False):
     print("① 크롤링 (원티드+링크드인 / 사람인+잡코리아+인크루트)...", flush=True)
     broad = crawl_wanted() + crawl_linkedin()          # 광범위 검색 → 엄격 필터
     domestic = crawl_saramin() + crawl_jobkorea() + crawl_incruit()  # 국내보드 타겟 검색 → 완화 필터
-    defense = crawl_defense()                           # 방산 프라임 한국 포지션 → 그대로 통과
-    print(f"   총 수집 {len(broad)+len(domestic)+len(defense)}건 "
-          f"(광범위 {len(broad)} / 국내보드 {len(domestic)} / 방산 {len(defense)})", flush=True)
-    if not broad and not domestic and not defense:
+    defense = crawl_defense()                           # 방산 프라임 한국 포지션
+    samsung = crawl_samsung()                            # 삼성 반도체/관련직 한국 포지션
+    print(f"   총 수집 {len(broad)+len(domestic)+len(defense)+len(samsung)}건 "
+          f"(광범위 {len(broad)} / 국내보드 {len(domestic)} / 방산 {len(defense)} / 삼성 {len(samsung)})", flush=True)
+    if not (broad or domestic or defense or samsung):
         print("   수집 0건 — 종료"); return
 
-    print("② 필터 (광범위=엄격 3중 / 국내보드=완화 / 방산=회사·한국타겟 통과)...", flush=True)
+    print("② 필터 (광범위=엄격 / 국내보드=완화 / 방산·삼성=회사·한국타겟 통과)...", flush=True)
     passed = [j for j in broad if passes_filter(j)]
     passed += [j for j in domestic if _looks_relevant(j["title"] + " " + j["desc"]) and _company_ok(j)]
-    passed += defense   # 방산: 회사명·한국 타겟이라 도메인필터 우회, 스코어러가 최종 판단
+    passed += defense + samsung   # 회사명·한국 타겟이라 도메인필터 우회, 스코어러가 최종 판단
     # id 기준 중복 제거
     _seen, _uniq = set(), []
     for j in passed:
@@ -666,7 +682,7 @@ def _collect_passed():
     domestic = crawl_saramin() + crawl_jobkorea() + crawl_incruit()
     passed = [j for j in broad if passes_filter(j)]
     passed += [j for j in domestic if _looks_relevant(j["title"] + " " + j["desc"]) and _company_ok(j)]
-    passed += crawl_defense()   # 방산 프라임 한국 포지션
+    passed += crawl_defense() + crawl_samsung()   # 방산·삼성 한국 포지션
     seen, uniq = set(), []
     for j in passed:
         if j["id"] not in seen:
@@ -780,7 +796,7 @@ footer{{text-align:center;color:#9aa;font-size:11px;padding:14px 16px 28px;line-
 <header><div class="h">🔔 오늘의 채용 매칭 {n}건</div>
 <div class="sub">{today} 기준 · 이력서 맥락 AI 평가(3점↑) · 점수순</div></header>
 {body}
-<footer>원티드·링크드인·사람인·잡코리아·인크루트·방산 통합<br>
+<footer>원티드·링크드인·사람인·잡코리아·인크루트·방산·삼성 통합<br>
 HMG·중소중견 제외 · 매일 21:00 KST 자동 업데이트</footer>
 </body></html>"""
     path = os.path.join(_BASE_DIR, "passed_jobs.html")
