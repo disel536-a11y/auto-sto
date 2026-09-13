@@ -109,6 +109,13 @@ MATCH_AMOUNT_HL_EOK  = 3000   # 이 값 이상이면 빨간 테두리 강조(억
 MATCH_SOLO_RATE_MIN  = 20.0   # 동조주 없이 혼자 급등한 종목을 조건부합에 띄우는 최소 상승률(%)
 MATCH_MAX            = 3      # 최대 표시 종목 수
 
+# 장 운영 시간 (분 단위, KST)
+#   2026-09 KRX 정규장 마감 연장(15:30 → 20:00) 반영.
+#   상한가 판정 / 마감 N상 집계 로직은 그대로 두고 '봇 가동 시간'만 넓힌다.
+MARKET_PRE_MIN   = 8 * 60      # 08:00  장 전 준비
+MARKET_OPEN_MIN  = 9 * 60      # 09:00  개장
+MARKET_CLOSE_MIN = 20 * 60     # 20:00  마감 → 이 시각 이후 오늘 세션 종료
+
 # ══════════════════════════════════════════════════
 
 NAVER_HEADERS = {
@@ -206,62 +213,105 @@ def _parse_naver_page(url: str, market: str, from_trans: bool = False) -> list:
     return results
 
 
+# ─── 네이버 모바일 시세 API (2026-09-11: PC 금융 시세표 폐지 대응) ───
+#   구 PC 페이지(finance.naver.com/sise/sise_quant.naver 등)가 stock.naver.com SPA 로
+#   리다이렉트되면서 HTML 표가 사라짐 → 요청은 200 이지만 파싱 0건 → "데이터 없음" 무한 재시도.
+#   대체 = m.stock.naver.com/api/stocks/{정렬}/{시장} JSON.
+#   살아있는 정렬: up(상승률) / down(하락률) / marketValue(시총). 거래대금 정렬은 없음
+#   → up + marketValue 합집합을 거래대금순으로 세워 trans 를 구성한다.
+NAVER_API_HEADERS = {
+    "User-Agent": NAVER_HEADERS["User-Agent"],
+    "Referer": "https://m.stock.naver.com/",
+    "Accept": "application/json",
+    "Accept-Language": "ko-KR,ko;q=0.9",
+}
+
+# 네이버 등락 구분 코드: 1=상한 2=상승 3=보합 4=하한 5=하락
+_DOWN_CODES = ("4", "5")
+
+
+def _api_num(*vals) -> float:
+    """'2,390' / 2390 / None 혼재 → float (첫 유효값)."""
+    for v in vals:
+        if v is None:
+            continue
+        if isinstance(v, (int, float)):
+            return float(v)
+        t = re.sub(r'[^0-9.\-]', '', str(v))
+        if t not in ('', '-', '.', '-.'):
+            try:
+                return float(t)
+            except ValueError:
+                pass
+    return 0.0
+
+
+def _api_stock_list(sort: str, market: str, page: int = 1, size: int = 100) -> list:
+    """네이버 모바일 시세 API → 기존 파서와 동일한 형태의 dict 리스트."""
+    url = (f"https://m.stock.naver.com/api/stocks/{sort}/{market}"
+           f"?page={page}&pageSize={size}")
+    results = []
+    try:
+        res = requests.get(url, headers=NAVER_API_HEADERS, timeout=10)
+        if res.status_code != 200:
+            print(f"  [네이버API/{market}/{sort}] HTTP {res.status_code}")
+            return results
+        for s in (res.json() or {}).get("stocks", []):
+            if s.get("stockEndType") not in (None, "stock"):
+                continue                       # ETF/ETN 등 제외
+            code = str(s.get("itemCode") or "").strip()
+            name = str(s.get("stockName") or "").strip()
+            if not re.fullmatch(r"\d{6}", code) or not name:
+                continue
+            rate = abs(_api_num(s.get("fluctuationsRatio")))
+            if str((s.get("compareToPreviousPrice") or {}).get("code") or "") in _DOWN_CODES:
+                rate = -rate                   # API 는 등락률을 절대값으로 준다
+            amt = _api_num(s.get("accumulatedTradingValueRaw"))
+            if not amt:                        # 폴백: 백만원 단위 필드
+                amt = _api_num(s.get("accumulatedTradingValue")) * 1_000_000
+            cap_raw = _api_num(s.get("marketValueRaw"))
+            cap_eok = int(cap_raw / 100_000_000) if cap_raw else int(_api_num(s.get("marketValue")))
+            results.append({
+                "코드":     code,
+                "종목명":   name,
+                "시장":     market,
+                "종가":     int(_api_num(s.get("closePriceRaw"), s.get("closePrice"))),
+                "등락률":   round(rate, 2),
+                "거래대금": int(amt),          # 원
+                "시총억":   cap_eok,           # 억원
+                "순위":     0,
+            })
+    except Exception as e:
+        print(f"  [네이버API/{market}/{sort}] 오류: {e}")
+    return results
+
+
 def fetch_market_data() -> dict:
     """
-    네이버 금융에서 데이터 수집.
+    네이버 모바일 시세 API 에서 데이터 수집.
     반환: {
-      "trans": [...],   # 거래대금 상위 (KOSPI+KOSDAQ 합쳐 거래대금 내림차순)
-      "rise":  [...],   # 상승률 상위 (KOSPI+KOSDAQ 합쳐 등락률 내림차순)
+      "trans": [...],   # 거래대금 내림차순 (KOSPI+KOSDAQ)
+      "rise":  [...],   # 등락률 내림차순 (상승 종목만)
       "all":   {code: stock}  # 코드별 통합 (상한가 탐지용)
     }
     """
-    quant, rise = [], []
+    rise, cap = [], []
+    for market in ("KOSPI", "KOSDAQ"):
+        rise += _api_stock_list("up", market, 1, 100)           # 상승률 상위 100
+        cap  += _api_stock_list("marketValue", market, 1, 100)  # 시총 상위 100(대금 참조용)
 
-    for sosok, market in [("0", "KOSPI"), ("1", "KOSDAQ")]:
-        # 거래대금/거래량 페이지 (거래대금 정확값 확보) — 2페이지까지
-        for page in (1, 2):
-            quant += _parse_quant_page(
-                f"https://finance.naver.com/sise/sise_quant.naver?sosok={sosok}&page={page}",
-                market
-            )
-        # 상승률 상위 (2페이지까지) — 동일 파서로 시총/거래대금까지 확보
-        for page in (1, 2):
-            rise += _parse_quant_page(
-                f"https://finance.naver.com/sise/sise_rise.naver?sosok={sosok}&page={page}",
-                market
-            )
-
-    # 거래대금 종목 코드별 통합(최대값 유지)
-    qmap = {}
-    for s in quant:
-        if s["코드"] not in qmap or s["거래대금"] > qmap[s["코드"]]["거래대금"]:
-            qmap[s["코드"]] = s
-
-    # 상승률 종목의 거래대금/시총을 quant(거래대금 페이지) 값으로 통일 → 상한가 목록과 일치
-    for s in rise:
-        q = qmap.get(s["코드"])
-        if q:
-            s["거래대금"] = q["거래대금"]   # 항상 quant 값으로 덮어씀(신뢰 소스)
-            if not s.get("시총억"):
-                s["시총억"] = q["시총억"]
-
-    # 코드별 통합 (상한가 탐지용) — quant 우선
-    seen = {}
-    for s in list(qmap.values()) + rise:
-        seen.setdefault(s["코드"], s)
-
-    def _dedup(lst):
-        out, seen_c = [], set()
-        for s in lst:
-            if s["코드"] not in seen_c:
-                out.append(s); seen_c.add(s["코드"])
-        return out
+    # 코드별 통합 — 같은 종목이 두 목록에 있으면 거래대금이 큰(=더 최신) 쪽 유지
+    allmap = {}
+    for s in cap + rise:
+        prev = allmap.get(s["코드"])
+        if prev is None or s["거래대금"] > prev["거래대금"]:
+            allmap[s["코드"]] = s
 
     return {
-        "trans": sorted(qmap.values(), key=lambda x: x["거래대금"], reverse=True),
-        "rise":  _dedup(sorted([s for s in rise if s["등락률"] > 0],
-                               key=lambda x: x["등락률"], reverse=True)),
-        "all":   seen,
+        "trans": sorted(allmap.values(), key=lambda x: x["거래대금"], reverse=True),
+        "rise":  sorted([s for s in allmap.values() if s["등락률"] > 0],
+                        key=lambda x: x["등락률"], reverse=True),
+        "all":   allmap,
     }
 
 
@@ -1297,13 +1347,13 @@ def is_market_open() -> bool:
     if now.weekday() >= 5:
         return False
     t = now.hour * 60 + now.minute
-    return 8 * 60 <= t <= 15 * 60 + 30
+    return MARKET_PRE_MIN <= t <= MARKET_CLOSE_MIN
 
 
 def is_pre_market() -> bool:
     now = datetime.now()
     t = now.hour * 60 + now.minute
-    return 8 * 60 <= t < 9 * 60
+    return MARKET_PRE_MIN <= t < MARKET_OPEN_MIN
 
 
 # ─── 메인 루프 ────────────────────────────────────
@@ -1380,13 +1430,13 @@ def main():
             print(f"[{now.strftime('%H:%M')}] 주말 — 봇 종료")
             break
         # 09:00 이전 → 개장 대기
-        if t < 9 * 60:
+        if t < MARKET_OPEN_MIN:
             print(f"[{now.strftime('%H:%M')}] 개장 전 — 대기...")
             time.sleep(30)
             continue
-        # 15:30 이후 → 오늘 세션 종료 (작업 스케줄러가 다음 거래일 09:00에 재시작)
-        if t > 15 * 60 + 30:
-            print(f"[{now.strftime('%H:%M')}] 장 마감(15:30) — 오늘 세션 종료")
+        # 마감 이후 → 오늘 세션 종료 (cron 이 다음 거래일 09:00 에 재시작)
+        if t > MARKET_CLOSE_MIN:
+            print(f"[{now.strftime('%H:%M')}] 장 마감({MARKET_CLOSE_MIN // 60:02d}:{MARKET_CLOSE_MIN % 60:02d}) — 오늘 세션 종료")
             break
 
         _touch(HEARTBEAT_FILE)   # 웹서버가 '봇 가동 중' 확인용(수동 새로고침 라우팅에 사용)
