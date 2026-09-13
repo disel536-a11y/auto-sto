@@ -34,6 +34,7 @@
   .live.err .dot{background:var(--warn);}
   .live.off{color:var(--tm); background:transparent; border:0.5px solid var(--bd);}
   .live.off .dot{background:var(--tm);}
+  .bnote{font-size:11px; color:var(--tm); margin-left:6px; vertical-align:middle;}
   .seg{border:0.5px solid var(--bd); border-radius:8px; display:inline-flex; overflow:hidden;}
   .seg button{font-size:12px; padding:4px 11px; border:0; background:transparent; color:var(--tm);
     cursor:pointer; font-family:inherit;}
@@ -199,7 +200,7 @@
 <div class="wrap">
   <div class="hd">
     <div class="hrow">
-      <div class="title">마켓중심 <span id="badge" class="live"><span class="dot"></span>실시간</span></div>
+      <div class="title">마켓중심 <span id="badge" class="live"><span class="dot"></span>실시간</span><span id="badgeNote" class="bnote hide"></span></div>
       <div class="hd-right">
         <button id="refreshBtn" class="rfs" title="새로고침" aria-label="새로고침">↻</button>
         <button id="acctBtn" class="rfs" title="계정" aria-label="계정">≡</button>
@@ -622,12 +623,14 @@
     return (now - u) > STALE_MIN*60*1000 ? 'err' : 'live';
   }
   function applyBadge(){
-    var b = document.getElementById('badge');
-    if(tab === 'board'){ b.className='live mkt'; b.textContent='공지·문의'; return; }
-    if(tab === 'warn'){  b.className='live mkt'; b.textContent='시장경보'; return; }
+    var b = document.getElementById('badge'), note = document.getElementById('badgeNote');
+    function setNote(txt){ note.textContent = txt || ''; note.classList.toggle('hide', !txt); }
+    if(tab === 'board'){ b.className='live mkt'; b.textContent='공지·문의'; setNote(''); return; }
+    if(tab === 'warn'){  b.className='live mkt'; b.textContent='시장경보'; setNote(''); return; }
     var s = marketState();
     b.className = 'live' + (s==='live' ? '' : ' ' + s);
-    b.innerHTML = '<span class="dot"></span>' + (s==='live' ? '실시간' : s==='err' ? '오류' : '종료');
+    b.innerHTML = '<span class="dot"></span>' + (s==='live' ? '실시간' : s==='err' ? '오류' : '장 종료');
+    setNote(s==='off' ? '평일 9시 시작' : '');
   }
 
   function loadTheme(cb){
