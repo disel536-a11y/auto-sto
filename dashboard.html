@@ -34,7 +34,8 @@
   .live.err .dot{background:var(--warn);}
   .live.off{color:var(--tm); background:transparent; border:0.5px solid var(--bd);}
   .live.off .dot{background:var(--tm);}
-  .bnote{font-size:11px; color:var(--tm); margin-left:6px; vertical-align:middle;}
+  .bwrap{display:inline-flex; flex-direction:column; align-items:center; gap:2px;}
+  .bnote{font-size:9.5px; line-height:1.1; color:var(--tm); white-space:nowrap;}
   .seg{border:0.5px solid var(--bd); border-radius:8px; display:inline-flex; overflow:hidden;}
   .seg button{font-size:12px; padding:4px 11px; border:0; background:transparent; color:var(--tm);
     cursor:pointer; font-family:inherit;}
@@ -200,7 +201,7 @@
 <div class="wrap">
   <div class="hd">
     <div class="hrow">
-      <div class="title">마켓중심 <span id="badge" class="live"><span class="dot"></span>실시간</span><span id="badgeNote" class="bnote hide"></span></div>
+      <div class="title">마켓중심 <span class="bwrap"><span id="badge" class="live"><span class="dot"></span>실시간</span><span id="badgeNote" class="bnote hide"></span></span></div>
       <div class="hd-right">
         <button id="refreshBtn" class="rfs" title="새로고침" aria-label="새로고침">↻</button>
         <button id="acctBtn" class="rfs" title="계정" aria-label="계정">≡</button>
