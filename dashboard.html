@@ -11,12 +11,12 @@
   :root{
     --bg:#0d0f12; --scr:#15171c; --s1:#1e2128; --bd:rgba(255,255,255,.09);
     --tp:#e9eaee; --ts:#a1a4ac; --tm:#6c7079; --up:#ff6b66; --dn:#4c8dff;
-    --suc:#37c07d; --sucbg:rgba(55,192,125,.16); --warn:#e3b341;
+    --suc:#37c07d; --sucbg:rgba(55,192,125,.16); --warn:#e3b341; --warnbg:rgba(227,179,65,.16);
   }
   [data-theme="light"]{
     --bg:#efeee8; --scr:#ffffff; --s1:#f4f3ee; --bd:rgba(0,0,0,.10);
     --tp:#1b1b1a; --ts:#5f5e5a; --tm:#8a8880; --up:#d63a3a; --dn:#2f6fe0;
-    --suc:#0f9e5a; --sucbg:rgba(15,158,90,.12); --warn:#b8860b;
+    --suc:#0f9e5a; --sucbg:rgba(15,158,90,.12); --warn:#b8860b; --warnbg:rgba(184,134,11,.14);
   }
   *{box-sizing:border-box; -webkit-tap-highlight-color:transparent;}
   body{margin:0; background:var(--bg); color:var(--tp);
@@ -30,6 +30,10 @@
     display:inline-flex; align-items:center; gap:4px;}
   .live.mkt{color:var(--tm); background:transparent; border:0.5px solid var(--bd);}
   .dot{width:6px; height:6px; border-radius:50%; background:var(--suc); display:inline-block;}
+  .live.err{color:var(--warn); background:var(--warnbg);}
+  .live.err .dot{background:var(--warn);}
+  .live.off{color:var(--tm); background:transparent; border:0.5px solid var(--bd);}
+  .live.off .dot{background:var(--tm);}
   .seg{border:0.5px solid var(--bd); border-radius:8px; display:inline-flex; overflow:hidden;}
   .seg button{font-size:12px; padding:4px 11px; border:0; background:transparent; color:var(--tm);
     cursor:pointer; font-family:inherit;}
@@ -597,10 +601,39 @@
 
   // ── 데이터 로드 ──
   var lastData=null, lastAlert=null;
+  // ── 헤더 상태 배지: 실시간(초록) / 오류(노랑) / 종료(회색) ──
+  //   오류 = 장중인데 데이터가 STALE_MIN 넘게 안 바뀜(수집 실패) 또는 API 호출 실패.
+  //   2026-09-11 네이버 시세표 폐지 때 봇이 조용히 멈춘 걸 화면에서 못 알아챈 경험 반영.
+  var STALE_MIN = 5;
+  var MKT_OPEN_MIN = 9 * 60, MKT_CLOSE_MIN = 20 * 60;   // 2026-09 마감 연장(15:30→20:00)
+  var fetchFailed = false;
+
+  function _parseUpdated(s){        // "2026-09-10 15:30" → Date
+    var m = s ? String(s).match(/(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})/) : null;
+    return m ? new Date(+m[1], +m[2]-1, +m[3], +m[4], +m[5]) : null;
+  }
+  function marketState(){
+    var now = new Date(), t = now.getHours()*60 + now.getMinutes();
+    if(!_isBday(now) || t < MKT_OPEN_MIN || t > MKT_CLOSE_MIN) return 'off';   // 주말·공휴일·장외
+    if(fetchFailed) return 'err';
+    if(!lastData) return 'live';                       // 첫 로딩 중
+    var u = _parseUpdated(lastData.updated);
+    if(!u || u.toDateString() !== now.toDateString()) return 'err';  // 오늘 갱신분이 아님
+    return (now - u) > STALE_MIN*60*1000 ? 'err' : 'live';
+  }
+  function applyBadge(){
+    var b = document.getElementById('badge');
+    if(tab === 'board'){ b.className='live mkt'; b.textContent='공지·문의'; return; }
+    if(tab === 'warn'){  b.className='live mkt'; b.textContent='시장경보'; return; }
+    var s = marketState();
+    b.className = 'live' + (s==='live' ? '' : ' ' + s);
+    b.innerHTML = '<span class="dot"></span>' + (s==='live' ? '실시간' : s==='err' ? '오류' : '종료');
+  }
+
   function loadTheme(cb){
     fetch('/api/data',{cache:'no-store'}).then(function(r){return r.json();})
-      .then(function(d){ lastData=d; renderTheme(d); if(tab==='news') renderNews(d); if(cb)cb(d); })
-      .catch(function(){ if(tab==='theme') document.getElementById('sub').textContent='데이터를 불러오지 못했습니다.'; });
+      .then(function(d){ fetchFailed=false; lastData=d; renderTheme(d); if(tab==='news') renderNews(d); applyBadge(); if(cb)cb(d); })
+      .catch(function(){ fetchFailed=true; applyBadge(); if(tab==='theme') document.getElementById('sub').textContent='데이터를 불러오지 못했습니다.'; });
   }
   function loadWarn(cb){
     fetch('/api/alert',{cache:'no-store'}).then(function(r){return r.json();})
@@ -717,10 +750,10 @@
       badge.className='live mkt'; badge.textContent='시장경보';
       if(lastAlert) renderWarn(lastAlert); else { document.getElementById('sub').textContent='불러오는 중…'; loadWarn(); }
     }else if(t==='news'){
-      badge.className='live'; badge.innerHTML='<span class="dot"></span>실시간';
+      applyBadge();
       if(lastData) renderNews(lastData); else { document.getElementById('sub').textContent='불러오는 중…'; loadTheme(); }
     }else{
-      badge.className='live'; badge.innerHTML='<span class="dot"></span>실시간';
+      applyBadge();
       if(lastData) setThemeSub(lastData); else loadTheme();
     }
   }
@@ -731,9 +764,11 @@
   document.getElementById('upperToggle').addEventListener('click', function(){ upperExpanded=!upperExpanded; setUpperToggle(); });
 
   // 초기 로드
+  applyBadge();
   loadTheme();
   loadWarn();
   setInterval(function(){ loadTheme(); }, 60000);   // 테마는 1분 자동 갱신
+  setInterval(applyBadge, 20000);                   // 배지는 20초마다 재판정(장 마감·정체 감지)
 
   // ── 새로고침 버튼 (현재 탭 기준) ──
   var rbtn=document.getElementById('refreshBtn'), refreshing=false;
