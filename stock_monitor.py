@@ -519,6 +519,7 @@ def _gemini_once(spec: dict, prompt: str, retries: int):
     model = spec["name"]
     url = (f"https://generativelanguage.googleapis.com/v1beta/models/"
            f"{model}:generateContent?key={GEMINI_API_KEY}")
+    parse_fail = 0    # 파싱 실패 재시도 횟수(한도 절약을 위해 1회로 제한)
     for _ in range(retries + 1):
         cfg = {"temperature": 0.2, "maxOutputTokens": 8192}
         if model not in _no_jsonmode:
@@ -538,8 +539,18 @@ def _gemini_once(spec: dict, prompt: str, retries: int):
                 obj = _salvage_json(txt)
                 if obj is not None:
                     _model_429[model] = 0          # 정상 응답 → 백오프 해제
+                    if model != GEMINI_MODELS[0]["name"]:
+                        # 1순위가 아닌 모델이 받아냈다 = 폴백 중. 무슨 일인지 보이게 남긴다.
+                        print(f"  [LLM/{model}] 폴백 응답(1순위 {GEMINI_MODELS[0]['name']} 실패)")
                     return obj
-                print(f"  [LLM/{model}] JSON 파싱 실패(응답 잘림 추정) — 재시도")
+                # 파싱 실패는 1회만 재시도한다. 같은 모델이 계속 깨진 JSON 을 뱉는 경우
+                # 재시도가 하루 한도를 태울 뿐이라, 빨리 다음 모델로 넘기는 편이 낫다.
+                parse_fail += 1
+                fr = (r.json().get("candidates") or [{}])[0].get("finishReason")
+                print(f"  [LLM/{model}] JSON 파싱 실패 (finishReason={fr})"
+                      + (" — 재시도" if parse_fail < 2 else " — 다음 모델로"))
+                if parse_fail >= 2:
+                    return None
                 time.sleep(2)
             elif r.status_code == 429:
                 n = min(_model_429.get(model, 0) + 1, 8)
