@@ -81,7 +81,20 @@ KAKAO_ENABLED = False
 
 # ── Gemini (Google AI Studio) API 키 ────────────────
 GEMINI_API_KEY = _cfg("GEMINI_API_KEY")
-GEMINI_MODEL = "gemini-2.5-flash-lite"   # 무료 일일한도가 flash보다 큼 → 오후 소진 방지(대안: "gemini-2.5-flash")
+# ── LLM 모델 체인 (2026-09-15 개편) ──────────────────────────
+#   무료 일일한도(RPD)는 '프로젝트 × 모델' 단위로 따로 잡힌다.
+#   (429 응답의 quotaId = GenerateRequestsPerDayPerProjectPerModel-FreeTier)
+#   → 한 모델이 소진돼도 다른 모델은 자기 몫이 남아 있다. 체인으로 순회한다.
+#   · gemma 계열이 무료 한도가 가장 커서 1순위. 2.5-flash-lite 는 하루 20콜뿐이라
+#     (2026-09-15 실측) 더 이상 주력으로 못 쓴다 → 예비로 내림.
+#   · thinking=False 인 모델엔 thinkingConfig 를 보내지 않는다(미지원 400 방지).
+#   순서를 바꾸고 싶으면 이 리스트만 고치면 된다.
+GEMINI_MODELS = [
+    {"name": "gemma-4-26b-a4b-it",    "thinking": False},
+    {"name": "gemini-2.5-flash-lite", "thinking": True},
+    {"name": "gemini-2.5-flash",      "thinking": True},
+]
+GEMINI_MODEL = GEMINI_MODELS[0]["name"]   # 표시/호환용
 
 # 상한가 알림 기준 등락률 (%)
 UPPER_LIMIT_THRESHOLD = 29.0
@@ -487,34 +500,33 @@ def _salvage_json(txt: str):
 #   ① 콜 간 최소 간격(_GEMINI_MIN_GAP)을 둬 분당 한도 밑으로 유지,
 #   ② 429가 뜨면 그 자리에서 재시도하지 않고 _GEMINI_COOLDOWN 동안 모든 Gemini 콜을 전면
 #      중단(서킷브레이커) → 분당 버킷이 회복될 시간을 확보. (테마는 keep-previous로 유지)
-_GEMINI_MIN_GAP  = 4.5    # 콜 간 최소 간격(초)  → 분당 최대 ~13콜
-_GEMINI_COOLDOWN = 90.0   # 429 발생 시 전면 쿨다운(초) → 분당(60s) 버킷 회복 보장
-_gemini_last_call     = 0.0
-_gemini_cooldown_until = 0.0
+_GEMINI_MIN_GAP  = 4.5    # 콜 간 최소 간격(초) — 분당 한도 보호(전 모델 공통)
+_GEMINI_COOLDOWN = 90.0   # 429 1회째 쿨다운(초)
+#   429 가 연속되면 그 모델의 쿨다운을 2배씩 늘린다(90→180→…, 상한 6시간).
+#   분당 한도면 1~2회로 풀리고, 일일 한도 소진이면 길게 재워 다음 모델에 순번을 넘긴다.
+#   (일일 한도는 태평양 자정 = KST 16:00~17:00 에 리셋된다)
+_GEMINI_COOLDOWN_MAX = 6 * 3600.0
+_gemini_last_call = 0.0
+_model_block  = {}    # 모델명 -> 이 시각까지 호출 건너뜀
+_model_429    = {}    # 모델명 -> 연속 429 횟수
+_no_thinking  = set() # thinkingConfig 로 400 을 낸 모델(런타임 학습)
+_no_jsonmode  = set() # responseMimeType 으로 400 을 낸 모델(런타임 학습)
 
 
-def gemini_json(prompt: str, retries: int = 2):
-    """Gemini 호출 → JSON 파싱해서 dict/list 반환. 실패 시 None.
-    분당 한도 보호: 콜 간격 확보 + 429 시 전면 쿨다운(재시도 폭주 차단)."""
-    global _gemini_last_call, _gemini_cooldown_until
-    if not _gemini_ready():
-        return None
-    # 서킷브레이커: 최근 429로 쿨다운 중이면 호출 자체를 건너뜀(한도·폭주 방지)
-    if time.time() < _gemini_cooldown_until:
-        return None
+def _gemini_once(spec: dict, prompt: str, retries: int):
+    """모델 하나로 호출 시도. 성공 시 파싱된 객체, 실패/한도면 None."""
+    global _gemini_last_call
+    model = spec["name"]
     url = (f"https://generativelanguage.googleapis.com/v1beta/models/"
-           f"{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}")
-    body = {
-        "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {
-            "temperature": 0.2,
-            "responseMimeType": "application/json",
-            "maxOutputTokens": 8192,                    # 응답 잘림(테마 붕괴 유발) 방지
-            "thinkingConfig": {"thinkingBudget": 0},   # 2.5-flash 사고모드 OFF → 속도↑
-        },
-    }
-    for attempt in range(retries + 1):
-        # 콜 간 최소 간격 유지(분당 한도 보호)
+           f"{model}:generateContent?key={GEMINI_API_KEY}")
+    for _ in range(retries + 1):
+        cfg = {"temperature": 0.2, "maxOutputTokens": 8192}
+        if model not in _no_jsonmode:
+            cfg["responseMimeType"] = "application/json"
+        if spec.get("thinking") and model not in _no_thinking:
+            cfg["thinkingConfig"] = {"thinkingBudget": 0}   # 사고모드 OFF → 속도↑
+        body = {"contents": [{"parts": [{"text": prompt}]}], "generationConfig": cfg}
+
         gap = _GEMINI_MIN_GAP - (time.time() - _gemini_last_call)
         if gap > 0:
             time.sleep(gap)
@@ -525,20 +537,54 @@ def gemini_json(prompt: str, retries: int = 2):
                 txt = r.json()["candidates"][0]["content"]["parts"][0]["text"]
                 obj = _salvage_json(txt)
                 if obj is not None:
+                    _model_429[model] = 0          # 정상 응답 → 백오프 해제
                     return obj
-                print("  [Gemini] JSON 파싱 실패(응답 잘림 추정) — 재시도")
+                print(f"  [LLM/{model}] JSON 파싱 실패(응답 잘림 추정) — 재시도")
                 time.sleep(2)
             elif r.status_code == 429:
-                # 분당 한도 초과 — 재시도하지 않고 전면 쿨다운(폭주 차단). 다음 사이클에 재개.
-                _gemini_cooldown_until = time.time() + _GEMINI_COOLDOWN
-                print(f"  [Gemini] 분당 한도(429) — {int(_GEMINI_COOLDOWN)}초 전면 쿨다운(재시도 중단)")
+                n = min(_model_429.get(model, 0) + 1, 8)
+                _model_429[model] = n
+                cd = min(_GEMINI_COOLDOWN * (2 ** (n - 1)), _GEMINI_COOLDOWN_MAX)
+                _model_block[model] = time.time() + cd
+                # 응답 본문에 quotaId 가 있다(PerDay vs PerMinute 구분용) → 로그에 남긴다.
+                print(f"  [LLM/{model}] 한도(429) x{n} — {int(cd)}초 차단 | {r.text[:180]}")
+                return None
+            elif r.status_code == 400:
+                # 미지원 필드 자동 학습: 한 번 빼보고 재시도, 그래도 400 이면 포기.
+                body_txt = r.text[:300]
+                if "thinking" in body_txt.lower() and model not in _no_thinking:
+                    _no_thinking.add(model)
+                    print(f"  [LLM/{model}] thinkingConfig 미지원 — 제외하고 재시도")
+                    continue
+                if ("responseMimeType" in body_txt or "response_mime_type" in body_txt) \
+                        and model not in _no_jsonmode:
+                    _no_jsonmode.add(model)
+                    print(f"  [LLM/{model}] JSON 모드 미지원 — 프롬프트 지시로만 재시도")
+                    continue
+                print(f"  [LLM/{model}] HTTP 400: {body_txt}")
                 return None
             else:
-                print(f"  [Gemini] HTTP {r.status_code}: {r.text[:200]}")
+                print(f"  [LLM/{model}] HTTP {r.status_code}: {r.text[:200]}")
                 time.sleep(3)
         except Exception as e:
-            print(f"  [Gemini] 오류: {e}")
+            print(f"  [LLM/{model}] 오류: {e}")
             time.sleep(3)
+    return None
+
+
+def gemini_json(prompt: str, retries: int = 2):
+    """모델 체인을 순회하며 JSON 응답을 받아온다. 전부 실패하면 None.
+    한도(429)로 차단된 모델은 쿨다운이 풀릴 때까지 건너뛴다."""
+    if not _gemini_ready():
+        return None
+    now = time.time()
+    avail = [m for m in GEMINI_MODELS if _model_block.get(m["name"], 0.0) < now]
+    if not avail:
+        return None          # 전 모델 차단 중 — 조용히 포기(테마는 keep-previous)
+    for spec in avail:
+        obj = _gemini_once(spec, prompt, retries)
+        if obj is not None:
+            return obj
     return None
 
 
@@ -596,6 +642,12 @@ def _siztext(cap_eok: int) -> str:
 # 종목 상세정보 세션 캐시(증분 분석용): code -> {업종,사업,특이사항,핵심재료}
 #   봇은 매일 09:00 재시작(cron)되어 새로 비워지므로 하루 내에서만 재사용.
 _stock_info_cache = {}
+
+# 상세분석 실패 종목의 마지막 시도 시각: code -> ts
+#   실패해도 캐시에 안 들어가 매 스캔(60s) 같은 종목을 다시 호출하던 문제를 막는다.
+#   한도가 빡빡할 때 이 재호출이 테마 묶기의 호출 예산을 갉아먹는 주범이었다.
+_enrich_failed = {}
+_ENRICH_RETRY_GAP = 1800.0   # 실패 종목 재시도 최소 간격(초) = 30분
 
 
 def _llm_enrich(stocks: list, news_map: dict) -> dict:
@@ -718,14 +770,24 @@ def analyze_themes(market: dict) -> list:
     # 뉴스 수집 (캐시 공유: enrich·group·조건부합이 함께 사용 → 네이버 반복호출 감소)
     news_map = {s["코드"]: _news_cached(s["코드"], ttl=170, n=6) for s in uni}
 
-    # 3) 증분 상세분석: 캐시에 없는(새로 등장한) 종목만 → '한꺼번에' 처리하지 않음
-    need = [s for s in uni if s["코드"] not in _stock_info_cache]
+    # 3) 테마 묶기(작은 호출) 를 '먼저' — 화면의 핵심이라 호출 예산의 우선권을 준다.
+    #    (2026-09-15 수정) 이전엔 enrich 가 먼저라, 한도가 빡빡해지면 enrich 가 429 를 맞고
+    #    쿨다운을 걸어버려 그룹핑은 순서가 영영 오지 않았다 → 테마가 오전 분류에 얼어붙음.
+    themes_raw = _llm_group_themes(uni, news_map, seed_codes)
+
+    # 4) 증분 상세분석: 캐시에 없는 종목만. 실패해도 위의 그룹핑은 이미 확보돼 있다.
+    #    실패한 종목은 _enrich_failed 에 기록해 30분간 재호출하지 않는다(한도 보호).
+    _now = time.time()
+    need = [s for s in uni
+            if s["코드"] not in _stock_info_cache
+            and _now - _enrich_failed.get(s["코드"], 0.0) > _ENRICH_RETRY_GAP]
     if need:
         print(f"  [테마] 신규 {len(need)}종목 상세분석(증분)")
-        _stock_info_cache.update(_llm_enrich(need, news_map))
-
-    # 4) 테마 묶기(작은 호출) — 실패해도 상세분석 캐시는 보존
-    themes_raw = _llm_group_themes(uni, news_map, seed_codes)
+        got = _llm_enrich(need, news_map)
+        _stock_info_cache.update(got)
+        for s in need:
+            if s["코드"] not in got:
+                _enrich_failed[s["코드"]] = _now
     llm_failed = themes_raw is None
     if llm_failed:
         print("  [테마] LLM 테마 묶음 실패 → 폴백(직전 분류 유지 신호)")
