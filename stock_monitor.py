@@ -13,6 +13,7 @@
 import os
 import json
 import time
+import traceback
 import re
 import sys
 import requests
@@ -91,14 +92,13 @@ GEMINI_API_KEY = _cfg("GEMINI_API_KEY")
 #     thinking=False 는 그 필드를 아예 안 보내는 모델용. 400 이 나면 런타임에 학습해 뺀다.
 #   순서를 바꾸고 싶으면 이 리스트만 고치면 된다.
 GEMINI_MODELS = [
-    #   gemma-4 는 추론(thinking) 모델이라 thinkingBudget:0 으로 추론을 꺼야 한다.
-    #   (2026-09-18 실측: thoughtsTokenCount 2755, 추론 과정이 text 로 새어 나와 JSON 파싱 실패)
-    #   thinkingConfig 를 거부(400)하면 _no_thinking 이 학습해 자동으로 뺀다.
-    {"name": "gemma-4-26b-a4b-it",    "thinking": True},
+    #   gemma-4 는 추론(thinking) 모델인데 thinkingConfig 로 끄는 것을 API 가 거부한다(400, 실측).
+    #   그래서 추론 과정이 text 로 새어 나온다(thoughtsTokenCount ~2700) — 이건 _salvage_json 이
+    #   '마지막 JSON 블록' 을 고르는 방식으로 흡수한다. thinking=False 로 두어 헛호출을 막는다.
+    {"name": "gemma-4-26b-a4b-it",    "thinking": False},
     {"name": "gemini-2.5-flash-lite", "thinking": True},
     {"name": "gemini-2.5-flash",      "thinking": True},
 ]
-GEMINI_MODEL = GEMINI_MODELS[0]["name"]   # 표시/호환용
 
 # 상한가 알림 기준 등락률 (%)
 UPPER_LIMIT_THRESHOLD = 29.0
@@ -473,10 +473,10 @@ def _gemini_ready() -> bool:
 
 
 def _extract_text(resp: dict) -> str:
-    """응답에서 본문 텍스트를 뽑는다.
-    (2026-09-18) 모델이 응답을 여러 part 로 쪼개 보내는 경우가 있다. parts[0] 만 읽으면
-    추론 과정 part(산문 → 파싱 실패)나 빈 part(len=0)를 집게 된다.
-    → thought 로 표시된 part 는 빼고 나머지 텍스트를 전부 이어 붙인다."""
+    """응답의 모든 part 텍스트를 이어 붙여 본문을 만든다(parts[0] 하나만 읽지 않는다).
+    Gemini 계열 추론 모델이 includeThoughts 로 사고 과정을 별도 part(thought=true)로 줄 때는
+    그 part 를 제외한다. (gemma-4 는 사고 과정을 일반 text 에 섞어 보내므로 여기서 걸러지지
+    않고 _salvage_json 의 '마지막 블록 선택' 으로 처리된다.)"""
     cand = (resp.get("candidates") or [{}])[0]
     parts = (cand.get("content") or {}).get("parts") or []
     out = []
@@ -495,7 +495,8 @@ def _extract_text(resp: dict) -> str:
 def _salvage_json(txt: str):
     """Gemini 응답 텍스트를 최대한 관대하게 JSON 파싱.
     1) 그대로 파싱 → 2) 마크다운 펜스 제거 후 파싱 →
-    3) 첫 '{' 부터 괄호 균형이 맞는 지점까지 잘라 파싱(후행 잡음/부분 잘림 구제).
+    3) 본문 속 균형 잡힌 {...} 블록들 중 '마지막으로 파싱되는 것' 선택(서두 산문·후행 잡음·
+       추론 누출 속 스키마 되뇜 무시). 중간에 잘린 JSON 은 구제하지 않는다(파서가 못 읽음).
     실패하면 None."""
     if not txt:
         return None
@@ -558,11 +559,7 @@ def _salvage_json(txt: str):
                         end = j
                         break
         if end < 0:
-            # 닫히지 않은 블록(부분 잘림) — 지금까지 것을 시도하고 종료
-            obj = _loads(txt[start:])
-            if obj is not None:
-                best = obj
-            break
+            break                     # 닫히지 않은 블록 — 더 볼 것 없음
         obj = _loads(txt[start:end + 1])
         if obj is not None:
             best = obj
@@ -711,14 +708,13 @@ def classify_upper(stocks: list) -> dict:
     )
     data = gemini_json(prompt)
     out = {}
-    if data and isinstance(data.get("items"), list):
-        for it in data["items"]:
-            code = str(it.get("code", "")).strip()
-            if code:
-                out[code] = {
-                    "theme": (it.get("theme") or "").strip(),
-                    "summary": (it.get("summary") or "").strip(),
-                }
+    for it in _llm_items(data, "items"):
+        code = str(it.get("code", "")).strip()
+        if code:
+            out[code] = {
+                "theme": (it.get("theme") or "").strip(),
+                "summary": (it.get("summary") or "").strip(),
+            }
     return out
 
 
@@ -771,7 +767,7 @@ def _llm_enrich(stocks: list, news_map: dict) -> dict:
     )
     data = gemini_json(prompt)
     out = {}
-    for it in (data or {}).get("items", []) or []:
+    for it in _llm_items(data, "items"):
         c = str(it.get("code", "")).strip()
         if c:
             out[c] = it
@@ -783,6 +779,20 @@ def _join_summary(v) -> str:
     if isinstance(v, (list, tuple)):
         return "\n".join(str(x).strip() for x in v if str(x).strip())
     return v.strip() if isinstance(v, str) else ""
+
+
+def _llm_items(data, key: str) -> list:
+    """LLM 응답에서 리스트를 꺼낸다. {"key":[...]} 든, 바깥 껍데기 없는 [...] 든 수용.
+    (2026-09-18) gemma 가 {"items":[...]} 대신 [...] 를 돌려줘 .get 에서 봇이 죽은 사고 방지.
+    원소는 dict 만 남긴다."""
+    if isinstance(data, dict):
+        v = data.get(key)
+        items = v if isinstance(v, list) else []
+    elif isinstance(data, list):
+        items = data
+    else:
+        items = []
+    return [it for it in items if isinstance(it, dict)]
 
 
 def _clip_grade(v) -> int:
@@ -827,10 +837,8 @@ def _llm_group_themes(uni: list, news_map: dict, seed_codes: set):
         "종목 목록:\n" + "\n".join(blocks)
     )
     data = gemini_json(prompt)
-    if not data or not isinstance(data, dict):
-        return None
-    themes = data.get("themes")
-    if not isinstance(themes, list) or not themes:
+    themes = _llm_items(data, "themes")   # {"themes":[...]} 또는 바깥 껍데기 없는 [...] 모두 수용
+    if not themes:
         return None
     # 검증: 종목코드가 실제로 든 테마가 최소 하나는 있어야 한다.
     #   (2026-09-18) 모델이 스키마만 되뇐 빈 껍데기 {"테마":"","codes":[""]} 가 '성공' 으로
@@ -849,8 +857,9 @@ def analyze_themes(market: dict) -> list:
     """
     1) 거래대금 상위(제외 후) 중 상승률 10%+ = 시드(대장주)
     2) 분석 대상 uni = 상승률 상위 20 ∪ 시드
-    3) [증분] 아직 상세정보 없는 종목만 _llm_enrich → _stock_info_cache 에 축적(순차 처리)
-    4) _llm_group_themes 로 '테마 묶기'만 별도 호출(작은 응답)
+    3) _llm_group_themes 로 '테마 묶기' 먼저(화면의 핵심 → 호출 예산 우선권)
+    4) [증분] 아직 상세정보 없는 종목만 _llm_enrich → _stock_info_cache 에 축적
+       (실패 종목은 _enrich_failed 에 기록해 30분간 재호출 안 함)
     5) 테마 내 상승률 내림차순, 테마는 총거래대금 순
     반환: [{"테마","요약","종목":[...],"_amount":..}, ...]
 
@@ -1630,68 +1639,76 @@ def main():
             except OSError:
                 pass
 
-        print(f"\n[{now.strftime('%H:%M')}] 스캔 중...")
-        market = fetch_market_data()
-        if not market["all"]:
-            print("  데이터 없음 — 재시도")
-            time.sleep(15)
-            continue
+        try:
+            print(f"\n[{now.strftime('%H:%M')}] 스캔 중...")
+            market = fetch_market_data()
+            if not market["all"]:
+                print("  데이터 없음 — 재시도")
+                time.sleep(15)
+                continue
 
-        stocks = list(market["all"].values())
+            stocks = list(market["all"].values())
 
-        # ① 상한가 — 매 스캔 최신 목록(등락률 즉시 반영). 신규는 카톡, 수동새로고침 시 전체 재분류
-        #    정렬: 먼저 상한가 간 순(진입시각 파일 기록 기반)
-        upper_all = [s for s in stocks if s["등락률"] >= UPPER_LIMIT_THRESHOLD]
-        _record_upper_ts(upper_all)
-        upper_all.sort(key=_member_sort_key)
-        new_upper = [s for s in upper_all if s["코드"] not in alerted]
-        classify_targets = upper_all if force_refresh else new_upper
-        if classify_targets:
-            tm = classify_upper(classify_targets)
-            upper_theme_map.update(tm)
-        if new_upper:
-            for s in new_upper:
-                alerted.add(s["코드"])          # 분석 완료 표시(중복 카톡 방지)
-            msg = fmt_upper(new_upper, upper_theme_map)
-            print(msg)
-            send_kakao(msg)                      # KAKAO_ENABLED=False 면 내부에서 전송 skip
-        else:
-            print("  상한가 신규 없음")
-
-        # ② 테마 — 3분마다(또는 첫실행/수동새로고침) LLM 재분류, 그 사이엔 시세만 갱신
-        now_ts = time.time()
-        do_theme_llm = first_run or force_refresh or (now_ts - last_theme_ts >= THEME_LLM_INTERVAL)
-        if do_theme_llm:
-            was_first = first_run
-            groups = analyze_themes(market)
-            llm_failed = bool(groups) and any(g.get("_llm_failed") for g in groups)
-            if groups and not llm_failed:
-                # 정상 분류 성공 → 채택
-                last_themes = groups
-                last_theme_ts = now_ts
-                first_run = False
-                msg = fmt_theme(groups)
+            # ① 상한가 — 매 스캔 최신 목록(등락률 즉시 반영). 신규는 카톡, 수동새로고침 시 전체 재분류
+            #    정렬: 먼저 상한가 간 순(진입시각 파일 기록 기반)
+            upper_all = [s for s in stocks if s["등락률"] >= UPPER_LIMIT_THRESHOLD]
+            _record_upper_ts(upper_all)
+            upper_all.sort(key=_member_sort_key)
+            new_upper = [s for s in upper_all if s["코드"] not in alerted]
+            classify_targets = upper_all if force_refresh else new_upper
+            if classify_targets:
+                tm = classify_upper(classify_targets)
+                upper_theme_map.update(tm)
+            if new_upper:
+                for s in new_upper:
+                    alerted.add(s["코드"])          # 분석 완료 표시(중복 카톡 방지)
+                msg = fmt_upper(new_upper, upper_theme_map)
                 print(msg)
-                if was_first or force_refresh:
-                    send_kakao(msg)              # 카톡 테마 알림은 첫실행/수동새로고침 때만(도배 방지)
-            elif last_themes:
-                # LLM 실패 & 직전 정상 분류 있음 → 그대로 유지, 상승률 순서만 갱신 후 다음 스캔 재시도
-                #   (last_theme_ts 를 갱신하지 않으므로 다음 스캔에서 즉시 재분류 시도)
-                refresh_group_prices(last_themes, market)
-                print("  [테마] LLM 실패 — 직전 분류 유지(상승률 순서만 갱신), 다음 스캔 재시도")
+                send_kakao(msg)                      # KAKAO_ENABLED=False 면 내부에서 전송 skip
             else:
-                # 첫 시도부터 실패 & 직전 분류 없음 → 폴백이라도 임시 표시하되 곧 재시도
-                if groups:
-                    last_themes = groups
-                    print(fmt_theme(groups))
-                print("  [테마] LLM 실패 — 임시 표시, 다음 스캔 재시도")
-        else:
-            refresh_group_prices(last_themes, market)   # LLM 없이 시세만 최신화(상승률 순 재정렬)
-            remain = int(THEME_LLM_INTERVAL - (now_ts - last_theme_ts))
-            print(f"  테마 시세만 갱신 (다음 LLM 재분류까지 {max(0, remain)}s)")
+                print("  상한가 신규 없음")
 
-        # 대시보드 데이터 저장 (매 스캔)
-        save_dashboard_data(upper_all, upper_theme_map, last_themes)
+            # ② 테마 — THEME_LLM_INTERVAL 마다(또는 첫실행/수동새로고침) LLM 재분류, 그 사이엔 시세만 갱신
+            now_ts = time.time()
+            do_theme_llm = first_run or force_refresh or (now_ts - last_theme_ts >= THEME_LLM_INTERVAL)
+            if do_theme_llm:
+                was_first = first_run
+                groups = analyze_themes(market)
+                llm_failed = bool(groups) and any(g.get("_llm_failed") for g in groups)
+                if groups and not llm_failed:
+                    # 정상 분류 성공 → 채택
+                    last_themes = groups
+                    last_theme_ts = now_ts
+                    first_run = False
+                    msg = fmt_theme(groups)
+                    print(msg)
+                    if was_first or force_refresh:
+                        send_kakao(msg)              # 카톡 테마 알림은 첫실행/수동새로고침 때만(도배 방지)
+                elif last_themes:
+                    # LLM 실패 & 직전 정상 분류 있음 → 그대로 유지, 상승률 순서만 갱신 후 다음 스캔 재시도
+                    #   (last_theme_ts 를 갱신하지 않으므로 다음 스캔에서 즉시 재분류 시도)
+                    refresh_group_prices(last_themes, market)
+                    print("  [테마] LLM 실패 — 직전 분류 유지(상승률 순서만 갱신), 다음 스캔 재시도")
+                else:
+                    # 첫 시도부터 실패 & 직전 분류 없음 → 폴백이라도 임시 표시하되 곧 재시도
+                    if groups:
+                        last_themes = groups
+                        print(fmt_theme(groups))
+                    print("  [테마] LLM 실패 — 임시 표시, 다음 스캔 재시도")
+            else:
+                refresh_group_prices(last_themes, market)   # LLM 없이 시세만 최신화(상승률 순 재정렬)
+                remain = int(THEME_LLM_INTERVAL - (now_ts - last_theme_ts))
+                print(f"  테마 시세만 갱신 (다음 LLM 재분류까지 {max(0, remain)}s)")
+
+            # 대시보드 데이터 저장 (매 스캔)
+            save_dashboard_data(upper_all, upper_theme_map, last_themes)
+        except Exception:
+            # 스캔 한 번의 실패(LLM 응답 형태 이상·네트워크 등)가 봇 전체를 죽이면 안 된다.
+            # (2026-09-18) gemma 가 items 를 배열로 돌려줘 .get 에서 터지며 봇이 종료된 사고.
+            #   → 이번 스캔만 건너뛰고 30초 뒤 계속. 대시보드는 직전 data.json 을 유지한다.
+            print("  [오류] 스캔 중 예외 — 이번 스캔 건너뜀\n" + traceback.format_exc())
+            time.sleep(30)
+            continue
 
         print(f"  → {SCAN_INTERVAL}s 후 재스캔")
         time.sleep(SCAN_INTERVAL)
