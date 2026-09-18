@@ -451,18 +451,33 @@ def _salvage_json(txt: str):
     if not txt:
         return None
     txt = txt.strip()
-    try:
-        return json.loads(txt)
-    except Exception:
-        pass
+
+    # strict=False → 문자열 안의 '진짜 줄바꿈' 같은 제어문자를 허용한다.
+    #   (2026-09-18) gemma 가 요약을 이스케이프 대신 실제 개행으로 내보내
+    #   finishReason=STOP 인데도 파싱이 전부 실패하던 원인. 기본 json.loads 는 이를 거부한다.
+    def _loads(t):
+        try:
+            return json.loads(t, strict=False)
+        except Exception:
+            pass
+        t2 = re.sub(r",\s*([}\]])", r"\1", t)   # 후행 콤마 구제
+        if t2 != t:
+            try:
+                return json.loads(t2, strict=False)
+            except Exception:
+                pass
+        return None
+
+    obj = _loads(txt)
+    if obj is not None:
+        return obj
     # ```json ... ``` 펜스 제거
     if txt.startswith("```"):
         txt = re.sub(r"^```(?:json)?", "", txt).strip()
         txt = re.sub(r"```$", "", txt).strip()
-        try:
-            return json.loads(txt)
-        except Exception:
-            pass
+        obj = _loads(txt)
+        if obj is not None:
+            return obj
     # 첫 '{' 부터 괄호 균형이 맞는 마지막 '}' 까지 잘라 파싱
     start = txt.find("{")
     if start < 0:
@@ -487,10 +502,7 @@ def _salvage_json(txt: str):
             elif c == "}":
                 depth -= 1
                 if depth == 0:
-                    try:
-                        return json.loads(txt[start:i + 1])
-                    except Exception:
-                        return None
+                    return _loads(txt[start:i + 1])
     return None
 
 
@@ -547,8 +559,11 @@ def _gemini_once(spec: dict, prompt: str, retries: int):
                 # 재시도가 하루 한도를 태울 뿐이라, 빨리 다음 모델로 넘기는 편이 낫다.
                 parse_fail += 1
                 fr = (r.json().get("candidates") or [{}])[0].get("finishReason")
-                print(f"  [LLM/{model}] JSON 파싱 실패 (finishReason={fr})"
+                print(f"  [LLM/{model}] JSON 파싱 실패 (finishReason={fr}, len={len(txt)})"
                       + (" — 재시도" if parse_fail < 2 else " — 다음 모델로"))
+                if parse_fail >= 2:
+                    # 추측하지 않도록 원문 앞부분을 남긴다(개행은 한 줄로 접어서).
+                    print("    원문: " + txt[:400].replace("\n", "\\n"))
                 if parse_fail >= 2:
                     return None
                 time.sleep(2)
@@ -695,6 +710,13 @@ def _llm_enrich(stocks: list, news_map: dict) -> dict:
     return out
 
 
+def _join_summary(v) -> str:
+    """요약 필드를 문자열로 정규화. 모델이 배열로 줄 수도, 한 문자열로 줄 수도 있다."""
+    if isinstance(v, (list, tuple)):
+        return "\n".join(str(x).strip() for x in v if str(x).strip())
+    return v.strip() if isinstance(v, str) else ""
+
+
 def _clip_grade(v) -> int:
     """재료 인지도 등급을 1~5 정수로 정규화(파싱 실패/범위밖이면 1)."""
     try:
@@ -720,7 +742,7 @@ def _llm_group_themes(uni: list, news_map: dict, seed_codes: set):
         "너는 한국 증시 테마 분석가다. 아래 급등 종목들을 같은 재료/테마끼리 묶어라. "
         "뉴스에 없는 사실은 지어내지 마라.\n"
         "- 테마: 시장 통용 테마명 (예: 원전, 이차전지, 로봇, 호남 반도체 클러스터(지역), 신규상장 등)\n"
-        "- 요약: 그 테마가 오늘 부각된 핵심 뉴스를 2줄로(각 줄 최대 40자), '\\n' 로 구분\n"
+        "- 요약: 그 테마가 오늘 부각된 핵심 뉴스. 문자열 2개짜리 배열(각 40자 이내). 줄바꿈 문자는 쓰지 마라\n"
         "- codes: 그 테마에 속하는 종목코드 배열 (같은 재료면 반드시 함께 묶어라)\n"
         "- 등급: 그 테마 '재료(뉴스)'가 얼마나 널리 알려졌는지 1~5 정수. 재료를 아는 청중의 크기로 판단하라.\n"
         "    1 = 뚜렷한 뉴스/재료 없이 오름 (수급/차트만)\n"
@@ -733,7 +755,7 @@ def _llm_group_themes(uni: list, news_map: dict, seed_codes: set):
         "뚜렷한 공통 재료 없이 혼자 오른 종목들은 '개별 등락'으로 묶어라(등급 1). "
         "거래대금대장주가 포함된 테마를 우선한다. 한 종목은 한 테마에만.\n\n"
         "반드시 JSON 으로만:\n"
-        '{"themes":[{"테마":"","요약":"1줄\\n2줄","등급":3,"codes":["",""]}]}\n\n'
+        '{"themes":[{"테마":"","요약":["1줄","2줄"],"등급":3,"codes":["",""]}]}\n\n'
         "종목 목록:\n" + "\n".join(blocks)
     )
     data = gemini_json(prompt)
@@ -829,7 +851,7 @@ def analyze_themes(market: dict) -> list:
         members.sort(key=_member_sort_key)   # 상한가는 먼저 간 순, 나머지는 상승률순
         groups.append({
             "테마": (t.get("테마") or "기타").strip(),
-            "요약": (t.get("요약") or "").strip(),
+            "요약": _join_summary(t.get("요약")),
             "등급": _clip_grade(t.get("등급")),   # 재료 인지도 1~5성 (Gemini 판정)
             "종목": members,
             "_amount": sum(m.get("거래대금", 0) for m in members),   # 테마 총 거래대금
