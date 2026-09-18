@@ -418,27 +418,52 @@ def _clean_html(t: str) -> str:
 
 
 def get_news_headlines(code: str, n: int = 8) -> list:
-    """종목코드로 네이버 금융 종목뉴스 페이지에서 최신 제목 n개 반환."""
+    """종목코드로 네이버 '모바일' 뉴스 API 에서 최신 제목 n개 반환.
+
+    (2026-09-18) PC 페이지 finance.naver.com/item/news_news.naver 가 HTTP 410(폐지)으로
+    죽어 있었다 — 결과가 빈 리스트라 예외도 안 나고 조용히 모든 종목이 '관련 뉴스 없음' 이
+    됐고, 그 결과 LLM 이 대부분을 '개별 등락' 으로 묶었다. 시세표(9/11)와 같은 전환.
+
+    m.stock.naver.com/api/news/stock/{code}?pageSize=N&page=1 응답 형태:
+      [ {"total": k, "items": [ {"title", "titleFull", "body", "datetime", "officeName",
+                                 "mobileNewsUrl", ...}, ... ]},   # 유사 기사 묶음(cluster)
+        ... ]
+    묶음마다 대표 1건씩 뽑아 중복 없이 n개. title 은 '...' 로 잘리므로 titleFull 우선."""
     try:
-        url = f"https://finance.naver.com/item/news_news.naver?code={code}&page=1"
+        url = (f"https://m.stock.naver.com/api/news/stock/{code}"
+               f"?pageSize={max(n, 10)}&page=1")
         res = requests.get(url, headers=NAVER_HEADERS, timeout=10)
-        res.encoding = 'euc-kr'
-        html = res.text
-        titles = re.findall(r'<a[^>]+class="tit"[^>]*>(.*?)</a>', html, re.S)
-        if not titles:
-            titles = re.findall(r'class="tit"[^>]*>(.*?)</a>', html, re.S)
-        out, seen = [], set()
-        for t in titles:
-            title = _clean_html(t)
-            if title and title not in seen:
-                seen.add(title)
-                out.append(title[:120])
-            if len(out) >= n:
-                break
-        return out
+        if res.status_code != 200:
+            print(f"  [뉴스] {code} HTTP {res.status_code}")
+            return []
+        return _parse_mobile_news(res.json(), n)
     except Exception as e:
         print(f"  [뉴스] {code} 조회 오류: {e}")
         return []
+
+
+def _parse_mobile_news(data, n: int) -> list:
+    """모바일 뉴스 API 응답 → 제목 리스트. 묶음 구조/평면 구조 모두 수용."""
+    if isinstance(data, dict):            # 혹시 {"items":[...]} 로 감싸 오는 경우
+        data = data.get("items") or []
+    out, seen = [], set()
+    for cl in data or []:
+        if not isinstance(cl, dict):
+            continue
+        items = cl.get("items")
+        if items is None:                 # 묶음이 아니라 기사 자체인 경우
+            items = [cl]
+        for it in items or []:
+            if not isinstance(it, dict):
+                continue
+            title = _clean_html((it.get("titleFull") or it.get("title") or "").strip())
+            if title and title not in seen:
+                seen.add(title)
+                out.append(title[:120])
+                break                     # 묶음당 대표 1건(유사 기사 중복 방지)
+        if len(out) >= n:
+            break
+    return out
 
 
 # ─── Gemini LLM ───────────────────────────────────
@@ -857,6 +882,11 @@ def analyze_themes(market: dict) -> list:
 
     # 뉴스 수집 (캐시 공유: enrich·group·조건부합이 함께 사용 → 네이버 반복호출 감소)
     news_map = {s["코드"]: _news_cached(s["코드"], ttl=170, n=6) for s in uni}
+    empty = sum(1 for v in news_map.values() if not v)
+    if empty:
+        # 대부분 비어 있으면 뉴스 수집 경로가 죽은 것(2026-09-18: PC 페이지 410). 여기서 바로 보이게.
+        print(f"  [뉴스] {len(uni)}종목 중 뉴스 0건 {empty}종목"
+              + ("  ← 수집 경로 점검 필요" if empty >= max(3, len(uni) // 2) else ""))
 
     # 3) 테마 묶기(작은 호출) 를 '먼저' — 화면의 핵심이라 호출 예산의 우선권을 준다.
     #    (2026-09-15 수정) 이전엔 enrich 가 먼저라, 한도가 빡빡해지면 enrich 가 429 를 맞고
