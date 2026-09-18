@@ -87,10 +87,14 @@ GEMINI_API_KEY = _cfg("GEMINI_API_KEY")
 #   → 한 모델이 소진돼도 다른 모델은 자기 몫이 남아 있다. 체인으로 순회한다.
 #   · gemma 계열이 무료 한도가 가장 커서 1순위. 2.5-flash-lite 는 하루 20콜뿐이라
 #     (2026-09-15 실측) 더 이상 주력으로 못 쓴다 → 예비로 내림.
-#   · thinking=False 인 모델엔 thinkingConfig 를 보내지 않는다(미지원 400 방지).
+#   · thinking=True 면 thinkingConfig{thinkingBudget:0} 을 보내 추론을 끈다(속도↑, 추론 누출 방지).
+#     thinking=False 는 그 필드를 아예 안 보내는 모델용. 400 이 나면 런타임에 학습해 뺀다.
 #   순서를 바꾸고 싶으면 이 리스트만 고치면 된다.
 GEMINI_MODELS = [
-    {"name": "gemma-4-26b-a4b-it",    "thinking": False},
+    #   gemma-4 는 추론(thinking) 모델이라 thinkingBudget:0 으로 추론을 꺼야 한다.
+    #   (2026-09-18 실측: thoughtsTokenCount 2755, 추론 과정이 text 로 새어 나와 JSON 파싱 실패)
+    #   thinkingConfig 를 거부(400)하면 _no_thinking 이 학습해 자동으로 뺀다.
+    {"name": "gemma-4-26b-a4b-it",    "thinking": True},
     {"name": "gemini-2.5-flash-lite", "thinking": True},
     {"name": "gemini-2.5-flash",      "thinking": True},
 ]
@@ -443,6 +447,26 @@ def _gemini_ready() -> bool:
     return bool(GEMINI_API_KEY) and "붙여넣기" not in GEMINI_API_KEY
 
 
+def _extract_text(resp: dict) -> str:
+    """응답에서 본문 텍스트를 뽑는다.
+    (2026-09-18) 모델이 응답을 여러 part 로 쪼개 보내는 경우가 있다. parts[0] 만 읽으면
+    추론 과정 part(산문 → 파싱 실패)나 빈 part(len=0)를 집게 된다.
+    → thought 로 표시된 part 는 빼고 나머지 텍스트를 전부 이어 붙인다."""
+    cand = (resp.get("candidates") or [{}])[0]
+    parts = (cand.get("content") or {}).get("parts") or []
+    out = []
+    for pt in parts:
+        if pt.get("thought"):          # 추론 과정 part 는 본문이 아니다
+            continue
+        t = pt.get("text")
+        if t:
+            out.append(t)
+    if out:
+        return "".join(out)
+    # 전부 thought 로 표시된 경우엔 어쩔 수 없이 텍스트가 있는 part 라도 쓴다
+    return "".join(pt.get("text") or "" for pt in parts)
+
+
 def _salvage_json(txt: str):
     """Gemini 응답 텍스트를 최대한 관대하게 JSON 파싱.
     1) 그대로 파싱 → 2) 마크다운 펜스 제거 후 파싱 →
@@ -478,32 +502,47 @@ def _salvage_json(txt: str):
         obj = _loads(txt)
         if obj is not None:
             return obj
-    # 첫 '{' 부터 괄호 균형이 맞는 마지막 '}' 까지 잘라 파싱
-    start = txt.find("{")
-    if start < 0:
-        return None
-    depth = 0
-    in_str = False
-    esc = False
-    for i in range(start, len(txt)):
-        c = txt[i]
-        if in_str:
-            if esc:
-                esc = False
-            elif c == "\\":
-                esc = True
-            elif c == '"':
-                in_str = False
-        else:
-            if c == '"':
-                in_str = True
-            elif c == "{":
-                depth += 1
-            elif c == "}":
-                depth -= 1
-                if depth == 0:
-                    return _loads(txt[start:i + 1])
-    return None
+    # 본문 안의 균형 잡힌 {...} 블록을 모두 찾아 파싱되는 것 중 '마지막' 을 택한다.
+    #   (2026-09-18) 추론 모델은 답 앞에 사고 과정을 늘어놓고 그 안에서 스키마를 되뇐다 —
+    #   그 빈 스키마도 유효한 JSON 이라 '첫 번째' 블록을 잡으면 그걸 정답으로 오인한다.
+    #   실제 답은 맨 뒤에 오므로 마지막으로 파싱되는 블록을 쓴다.
+    best = None
+    i, n = 0, len(txt)
+    while True:
+        start = txt.find("{", i)
+        if start < 0:
+            break
+        depth, in_str, esc, end = 0, False, False, -1
+        for j in range(start, n):
+            c = txt[j]
+            if in_str:
+                if esc:
+                    esc = False
+                elif c == "\\":
+                    esc = True
+                elif c == '"':
+                    in_str = False
+            else:
+                if c == '"':
+                    in_str = True
+                elif c == "{":
+                    depth += 1
+                elif c == "}":
+                    depth -= 1
+                    if depth == 0:
+                        end = j
+                        break
+        if end < 0:
+            # 닫히지 않은 블록(부분 잘림) — 지금까지 것을 시도하고 종료
+            obj = _loads(txt[start:])
+            if obj is not None:
+                best = obj
+            break
+        obj = _loads(txt[start:end + 1])
+        if obj is not None:
+            best = obj
+        i = end + 1
+    return best
 
 
 # ── Gemini 호출 레이트 제어(무료 분당 한도 보호) ───────────────
@@ -547,7 +586,7 @@ def _gemini_once(spec: dict, prompt: str, retries: int):
         try:
             r = requests.post(url, json=body, timeout=120)
             if r.status_code == 200:
-                txt = r.json()["candidates"][0]["content"]["parts"][0]["text"]
+                txt = _extract_text(r.json())
                 obj = _salvage_json(txt)
                 if obj is not None:
                     _model_429[model] = 0          # 정상 응답 → 백오프 해제
@@ -564,6 +603,10 @@ def _gemini_once(spec: dict, prompt: str, retries: int):
                 if parse_fail >= 2:
                     # 추측하지 않도록 원문 앞부분을 남긴다(개행은 한 줄로 접어서).
                     print("    원문: " + txt[:400].replace("\n", "\\n"))
+                    if not txt:
+                        # 텍스트가 비면 응답 구조 자체를 봐야 한다(part 분리/필터링 등).
+                        cand = (r.json().get("candidates") or [{}])[0]
+                        print("    응답구조: " + json.dumps(cand, ensure_ascii=False)[:600])
                 if parse_fail >= 2:
                     return None
                 time.sleep(2)
@@ -759,10 +802,22 @@ def _llm_group_themes(uni: list, news_map: dict, seed_codes: set):
         "종목 목록:\n" + "\n".join(blocks)
     )
     data = gemini_json(prompt)
-    if not data:
+    if not data or not isinstance(data, dict):
         return None
     themes = data.get("themes")
-    return themes if themes else None
+    if not isinstance(themes, list) or not themes:
+        return None
+    # 검증: 종목코드가 실제로 든 테마가 최소 하나는 있어야 한다.
+    #   (2026-09-18) 모델이 스키마만 되뇐 빈 껍데기 {"테마":"","codes":[""]} 가 '성공' 으로
+    #   통과해 모든 종목이 '기타 급등주' 로 떨어지던 문제 방지. 빈 결과는 실패(keep-previous).
+    codes_in_uni = {s["코드"] for s in uni}
+    real = [t for t in themes
+            if isinstance(t, dict)
+            and any(str(c).strip() in codes_in_uni for c in (t.get("codes") or []))]
+    if not real:
+        print(f"  [테마] 그룹핑 응답에 유효 종목이 없음(테마 {len(themes)}개, 껍데기) → 실패 처리")
+        return None
+    return real
 
 
 def analyze_themes(market: dict) -> list:
